@@ -12,7 +12,7 @@ import {
 import { ChangedFiles } from '../src/ui/repositories';
 import type * as vscode from 'vscode';
 import { describe, expect, it, vi } from 'vitest';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { shortHash } from '../src/core/presentation';
 import {
@@ -32,6 +32,7 @@ import { revisionUri } from '../src/ui/revisions';
 import { commitAll } from './gitFixtures';
 import { GitClient, runGit } from '../src/git/client';
 import { createUncommittedChanges } from '../src/git/uncommitted';
+import type { UncommittedChanges } from '../src/core/uncommitted';
 
 async function fixture() {
   const { directory, git } = await repository();
@@ -56,6 +57,295 @@ async function fixture() {
   return { directory, git, access, commits, rewritten, comments, auto, comment, commit, saved, documents };
 }
 describe('autoRefresh', () => {
+  async function uncommittedFixture() {
+    const f = await fixture();
+    f.auto.dispose();
+    await writeFile(join(f.directory, 'file'), 'saved');
+    const initial = await createUncommittedChanges(f.git, '2026-11-14T00:00:00Z');
+    const comment = {
+      ...f.comment,
+      commit: initial.unstaged.commit.hash,
+      uncommitted: { kind: 'unstaged' as const, createdAt: initial.createdAt },
+    };
+    f.saved.splice(0, f.saved.length, comment);
+    await f.commits.reload();
+    await f.rewritten.refresh();
+    const capture = vi.fn((git: GitClient) => createUncommittedChanges(git, new Date().toISOString()));
+    const auto = new AutoRefresh(f.access, f.commits, f.rewritten, f.documents, capture);
+    disposeAfter(auto);
+    await auto.rewatch({ refresh: false });
+    const completed = vi.spyOn(f.documents, 'openDiffTargets');
+    async function update(path: string, kind: 'changed' | 'created' | 'deleted' = 'changed') {
+      completed.mockClear();
+      emitFileEvent(path, kind);
+      await waitFor(() => expect(completed).toHaveBeenCalledTimes(2));
+    }
+    return { ...f, auto, capture, completed, update, comment };
+  }
+  it.each(['changed', 'created', 'deleted'] as const)('作業ツリーの%sを共有し履歴を再取得しない', async (kind) => {
+    const { directory, git, commits, rewritten, capture, update, comment } = await uncommittedFixture();
+    const log = vi.spyOn(GitClient.prototype, 'log');
+    const history = vi.fn();
+    commits.onDidChangeHistory(history);
+    if (kind === 'deleted') {
+      await rm(join(directory, 'file'));
+    } else {
+      await writeFile(join(directory, 'file'), 'edited');
+    }
+    await update(join(directory, 'file'), kind);
+    expect(capture).toHaveBeenCalledTimes(1);
+    const node = (await commits.getChildren())[0]!;
+    expect(node.kind).toBe('uncommitted');
+    if (node.kind !== 'uncommitted') {
+      throw new Error('uncommitted expected');
+    }
+    const current = await createUncommittedChanges(git, '2026-11-15T00:00:00Z');
+    expect(node.changes.unstaged.commit.hash).toBe(current.unstaged.commit.hash);
+    expect(rewritten.has(comment)).toBe(true);
+    expect(log.mock.calls.filter(([, limit]) => limit > 1)).toEqual([]);
+    expect(history).not.toHaveBeenCalled();
+  });
+  it('同じ結果では既存ノードを保ち、復元と最後の変更の消滅に追従する', async () => {
+    const { directory, commits, rewritten, update, comment } = await uncommittedFixture();
+    const node = (await commits.getChildren())[0]!;
+    const changed = vi.fn();
+    const judged = vi.fn();
+    commits.onDidChangeTreeData(changed);
+    rewritten.onDidChange(judged);
+    await update(join(directory, 'file'));
+    expect(changed).not.toHaveBeenCalled();
+    expect(judged).not.toHaveBeenCalled();
+    expect((await commits.getChildren(node)).length).toBeGreaterThan(0);
+    for (const value of ['edited', 'saved', 'one']) {
+      changed.mockClear();
+      judged.mockClear();
+      await writeFile(join(directory, 'file'), value);
+      await update(join(directory, 'file'));
+      expect(rewritten.has(comment)).toBe(value !== 'saved');
+      expect(changed).toHaveBeenCalledTimes(1);
+      expect(judged).toHaveBeenCalledTimes(1);
+    }
+    expect((await commits.getChildren()).map((n) => n.kind)).toEqual(['commit']);
+    await writeFile(join(directory, 'new'), 'new');
+    await update(join(directory, 'new'), 'created');
+    await rm(join(directory, 'new'));
+    await update(join(directory, 'new'), 'deleted');
+    expect((await commits.getChildren()).map((n) => n.kind)).toEqual(['commit']);
+  });
+  it('無視と管理領域・ルート外を除外し、混在と無視判定失敗では更新する', async () => {
+    const { directory, access, capture, completed, update } = await uncommittedFixture();
+    await writeFile(join(directory, '.gitignore'), 'dist/\n');
+    const watcher = watchers.find((w) => !w.disposed && w.pattern.pattern === '**')!;
+    expect(watcher).toBeDefined();
+    vi.useFakeTimers();
+    for (const path of [
+      '.git/objects/xx',
+      '.git/config',
+      '.git/index.lock',
+      '.git/FETCH_HEAD',
+      '.git',
+      '../other/a',
+      '../' + directory.split('/').at(-1) + '-other/a',
+    ]) {
+      watcher.changed.fire(Uri.file(join(directory, path)));
+    }
+    await vi.advanceTimersByTimeAsync(300);
+    expect(capture).not.toHaveBeenCalled();
+    const ignored = vi.spyOn(GitClient.prototype, 'ignoredPaths');
+    emitFileEvent(join(directory, 'dist/out.js'));
+    await vi.advanceTimersByTimeAsync(300);
+    vi.useRealTimers();
+    await waitFor(() => expect(ignored).toHaveResolvedWith(new Set(['dist/out.js'])));
+    expect(capture).not.toHaveBeenCalled();
+    emitFileEvent(join(directory, 'dist/out.js'));
+    watcher.changed.fire(Uri.file(join(directory, '..name')));
+    await waitFor(() => expect(completed).toHaveBeenCalledTimes(2));
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(ignored.mock.calls.at(-1)?.[0]).toEqual(expect.arrayContaining(['dist/out.js', '..name']));
+    capture.mockClear();
+    completed.mockClear();
+    const client = access.client(directory);
+    vi.spyOn(access, 'client').mockReturnValue(client);
+    vi.spyOn(client, 'ignoredPaths').mockRejectedValue(new Error('ignore failed'));
+    await update(join(directory, 'file'));
+    expect(window.showErrorMessage).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
+  it.each(['index', 'path', 'failure'] as const)('各ルートはindex優先で一度だけ判定する: %s', async (kind) => {
+    const { directory, access, auto, update } = await uncommittedFixture();
+    const second = await repository();
+    await access.discover([workspaceFolder(directory), workspaceFolder(second.directory, 1)]);
+    await auto.rewatch({ refresh: false });
+    const ignored = vi.spyOn(GitClient.prototype, 'ignoredPaths');
+    if (kind === 'failure') {
+      ignored.mockRejectedValue(new Error('ignore failed'));
+    }
+    emitFileEvent(join(directory, kind === 'index' ? '.git/index' : 'file'));
+    await update(join(second.directory, 'second-file'));
+    expect(ignored.mock.calls.map(([paths]) => paths)).toEqual(
+      kind === 'index' ? [['second-file']] : [['file'], ['second-file']],
+    );
+  });
+  it.each(['removed', 'rewatch', 'dispose'] as const)('古い監視の無視判定エラーを通知しない: %s', async (kind) => {
+    const { directory, access, auto, capture } = await uncommittedFixture();
+    let reject!: (error: Error) => void;
+    const ignored = vi.spyOn(GitClient.prototype, 'ignoredPaths').mockImplementation(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    vi.useFakeTimers();
+    if (kind === 'removed') {
+      await access.discover([]);
+    }
+    emitFileEvent(join(directory, 'file'));
+    await vi.advanceTimersByTimeAsync(300);
+    if (kind === 'removed') {
+      expect(ignored).not.toHaveBeenCalled();
+    } else {
+      expect(ignored).toHaveBeenCalledTimes(1);
+      if (kind === 'rewatch') {
+        await auto.rewatch({ refresh: false });
+      } else {
+        auto.dispose();
+      }
+      reject(new Error('old ignore failed'));
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    vi.useRealTimers();
+    expect(window.showErrorMessage).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+  });
+  it('保存の連打を300msでまとめ、取得中の変化は直列に取り直す', async () => {
+    const { directory, capture, completed, commits } = await uncommittedFixture();
+    let release!: (value: UncommittedChanges) => void;
+    const blocked = new Promise<UncommittedChanges>((resolve) => {
+      release = resolve;
+    });
+    const initial = await createUncommittedChanges(new GitClient(directory), '2026-11-14T00:00:00Z');
+    capture.mockReturnValueOnce(blocked);
+    vi.useFakeTimers();
+    for (let i = 0; i < 3; i++) {
+      emitFileEvent(join(directory, 'file'));
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    await vi.advanceTimersByTimeAsync(199);
+    expect(capture).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    vi.useRealTimers();
+    await waitFor(() => expect(capture).toHaveBeenCalledTimes(1));
+    await writeFile(join(directory, 'file'), 'latest');
+    vi.useFakeTimers();
+    emitFileEvent(join(directory, 'file'));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(capture).toHaveBeenCalledTimes(1);
+    release(initial);
+    vi.useRealTimers();
+    await waitFor(() => expect(completed).toHaveBeenCalledTimes(4));
+    expect(capture).toHaveBeenCalledTimes(2);
+    const node = (await commits.getChildren())[0]!;
+    const current = await createUncommittedChanges(new GitClient(directory), '2026-11-15T00:00:00Z');
+    expect(node).toMatchObject({
+      changes: { unstaged: { commit: { hash: current.unstaged.commit.hash } } },
+    });
+  });
+  it('失敗も共有し、連続失敗後に復旧する', async () => {
+    const { directory, capture, update, commits, rewritten, comment } = await uncommittedFixture();
+    await writeFile(join(directory, 'file'), 'edited');
+    for (let i = 0; i < 2; i++) {
+      capture.mockRejectedValueOnce(new Error('snapshot failed'));
+      await update(join(directory, 'file'));
+      expect(capture).toHaveBeenCalledTimes(i + 1);
+      expect((await commits.getChildren()).map((n) => n.kind)).toEqual(['commit']);
+      expect(rewritten.has(comment)).toBe(false);
+    }
+    await update(join(directory, 'file'));
+    expect(capture).toHaveBeenCalledTimes(3);
+    expect(rewritten.has(comment)).toBe(true);
+    expect((await commits.getChildren())[0]?.kind).toBe('uncommitted');
+  });
+  it('indexの削除と再作成を監視する', async () => {
+    const { directory, update, commits } = await uncommittedFixture();
+    await runGit(directory, ['add', 'file']);
+    for (const kind of ['deleted', 'created'] as const) {
+      await update(join(directory, '.git/index'), kind);
+      const node = (await commits.getChildren())[0]!;
+      expect(node).toMatchObject({
+        changes: { staged: { files: [{ path: 'file', status: 'M' }] }, unstaged: { files: [] } },
+      });
+    }
+  });
+  it('複数ルートの失敗を隔離してルートごとに一度取得する', async () => {
+    const { directory, access, auto, saved, capture, update, rewritten, comment } = await uncommittedFixture();
+    const second = await repository();
+    const changes = await createUncommittedChanges(second.git, '2026-11-14T00:00:00Z');
+    const other = { ...comment, repoRoot: second.directory, commit: changes.unstaged.commit.hash };
+    saved.push(other);
+    await access.discover([workspaceFolder(directory), workspaceFolder(second.directory, 1)]);
+    await auto.rewatch({ refresh: false });
+    await writeFile(join(second.directory, 'new'), 'changed');
+    capture.mockImplementation((git) =>
+      git.root === directory
+        ? Promise.reject(new Error('A failed'))
+        : createUncommittedChanges(git, '2026-11-15T00:00:00Z'),
+    );
+    emitFileEvent(join(second.directory, 'new'));
+    await update(join(directory, 'file'));
+    expect(capture.mock.calls.map(([git]) => git.root)).toEqual([directory, second.directory]);
+    expect([rewritten.has(comment), rewritten.has(other)]).toEqual([false, true]);
+  });
+  it('Bだけの変更ではAを取り直さず、Aの判定と選択中の一覧を保つ', async () => {
+    const { directory, access, auto, saved, capture, update, rewritten, comment, commits } = await uncommittedFixture();
+    await writeFile(join(directory, 'file'), 'edited');
+    await update(join(directory, 'file'));
+    expect(rewritten.has(comment)).toBe(true);
+    const second = await repository();
+    const changes = await createUncommittedChanges(second.git, '2026-11-14T00:00:00Z');
+    const other = { ...comment, repoRoot: second.directory, commit: changes.unstaged.commit.hash };
+    saved.push(other);
+    await access.discover([workspaceFolder(directory), workspaceFolder(second.directory, 1)]);
+    await auto.rewatch({ refresh: false });
+    const before = await commits.getChildren();
+    const reload = vi.spyOn(commits, 'reload');
+    capture.mockClear();
+    await writeFile(join(second.directory, 'new'), 'changed');
+    await update(join(second.directory, 'new'));
+    expect(capture.mock.calls.map(([git]) => git.root)).toEqual([second.directory]);
+    expect(reload).not.toHaveBeenCalled();
+    expect(await commits.getChildren()).toEqual(before);
+    expect([rewritten.has(comment), rewritten.has(other)]).toEqual([true, true]);
+  });
+  it('無効化・再有効化・選択変更で新しい監視へ移り、タブを変えない', async () => {
+    const { directory, auto, capture, commits, access, update } = await uncommittedFixture();
+    const node = (await commits.getChildren())[0]!;
+    const group = (await commits.getChildren(node))[0]!;
+    const file = (await commits.getChildren(group))[0]!;
+    if (file.kind !== 'file') {
+      throw new Error('file expected');
+    }
+    const tab = new TabInputTextDiff(revisionUri(file, 'old'), revisionUri(file, 'new'));
+    activateTab(tab);
+    vi.useFakeTimers();
+    emitFileEvent(join(directory, 'file'));
+    const old = watchers.filter((w) => !w.disposed);
+    globalConfiguration.set('vsreview.autoRefresh', false);
+    await auto.rewatch();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(old.every((w) => w.disposed)).toBe(true);
+    expect(capture).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    globalConfiguration.set('vsreview.autoRefresh', true);
+    await auto.rewatch({ refresh: false });
+    await update(join(directory, 'file'));
+    const second = await repository();
+    await access.discover([workspaceFolder(second.directory)]);
+    await commits.select(second.git);
+    await auto.rewatch({ refresh: false });
+    await update(join(second.directory, 'new'), 'created');
+    expect(commits.git?.root).toBe(second.directory);
+    expect(window.tabGroups.activeTabGroup.activeTab?.input).toBe(tab);
+  });
   it('変更済みの未コミット差分をHEADイベント後に一度だけ通知する', async () => {
     const { directory, git, commits, rewritten, documents, auto } = await fixture();
     await writeFile(join(directory, 'file'), 'saved');
@@ -199,7 +489,8 @@ describe('autoRefresh', () => {
     try {
       const access = await accessFor(linked);
       const commits = new CommitsTree(() => [], access, new ChangedFiles(access));
-      const auto = new AutoRefresh(access, commits, rewritten, documents);
+      const capture = vi.fn((git: GitClient) => createUncommittedChanges(git, '2026-11-15T00:00:00Z'));
+      const auto = new AutoRefresh(access, commits, rewritten, documents, capture);
       disposeAfter(auto);
       disposeAfter(commits);
       await commits.select(access.client(linked));
@@ -218,6 +509,19 @@ describe('autoRefresh', () => {
       await waitFor(() => expect(changed).toHaveBeenCalled());
       expect(commits.git?.root).toBe(linked);
       expect(await git.head()).toBe(await access.client(linked).head());
+      capture.mockClear();
+      vi.useFakeTimers();
+      emitFileEvent(join(dirs.commonDir, 'index'));
+      await vi.advanceTimersByTimeAsync(300);
+      expect(capture).not.toHaveBeenCalled();
+      vi.useRealTimers();
+      await writeFile(join(linked, 'file'), 'indexed');
+      await runGit(linked, ['add', 'file']);
+      changed.mockClear();
+      emitFileEvent(join(dirs.gitDir, 'index'));
+      await waitFor(() => expect(changed).toHaveBeenCalled());
+      expect(capture).toHaveBeenCalledTimes(1);
+      expect((await commits.getChildren())[0]).toMatchObject({ changes: { staged: { files: [{ path: 'file' }] } } });
       auto.dispose();
     } finally {
       await runGit(directory, ['worktree', 'remove', '--force', linked]);

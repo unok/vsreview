@@ -8,10 +8,8 @@ import { groupBy } from '../core/collections';
 import type { ReviewDocuments } from './documents';
 import type { RepositoryAccess } from './repositories';
 import { showError } from './common';
-import { createUncommittedChanges } from '../git/uncommitted';
-import { isUncommittedChanged, type UncommittedChanges } from '../core/uncommitted';
-import type { GitClient } from '../git/client';
-type CaptureUncommitted = (git: GitClient) => Promise<UncommittedChanges>;
+import { captureUncommittedChanges, type CaptureUncommitted } from '../git/uncommitted';
+import { isUncommittedChanged } from '../core/uncommitted';
 export type RewrittenTarget = Pick<ReviewComment, 'repoRoot' | 'commit'> & {
   parent?: string;
   pullRequest?: PullRequestComparison;
@@ -28,38 +26,69 @@ export class RewrittenComments implements vscode.Disposable {
   readonly onDidChange = this.changed.event;
   private generation = 0;
   private keys = new Set<string>();
-  private pending: Promise<void> | undefined;
+  private pending:
+    { promise: Promise<void>; captureUncommitted: CaptureUncommitted; onlyIfChanged: boolean } | undefined;
+  private notificationRequired = false;
   constructor(
     private readonly targets: () => Promise<readonly RewrittenTarget[]>,
     private readonly access: RepositoryAccess,
     private readonly pullRequestReviews: Pick<PullRequestReviews, 'latestHead'>,
-    // 削除前の判定を古くしないよう、CommitsTree の取得結果を再利用せず毎回取り直す。
-    private readonly captureUncommitted: CaptureUncommitted = (git) =>
-      createUncommittedChanges(git, new Date().toISOString()),
+    // 削除前の判定は取り直し、自動更新で注入された取得だけを共有する。
+    private readonly captureUncommitted: CaptureUncommitted = captureUncommittedChanges,
   ) {}
   has = (comment: RewrittenTarget): boolean => this.keys.has(comparisonKey(comment));
-  async refresh(): Promise<void> {
-    let pending = this.refreshTargets();
+  async refresh(
+    options: { captureUncommitted?: CaptureUncommitted; onlyIfChanged?: boolean; roots?: ReadonlySet<string> } = {},
+  ): Promise<void> {
+    this.notificationRequired ||= !options.onlyIfChanged;
+    const captureUncommitted = options.captureUncommitted ?? this.captureUncommitted;
+    const onlyIfChanged = options.onlyIfChanged === true;
+    let pending = {
+      promise: this.refreshTargets(captureUncommitted, onlyIfChanged, options.roots),
+      captureUncommitted,
+      onlyIfChanged,
+    };
     this.pending = pending;
     for (;;) {
-      await pending;
+      await pending.promise;
       if (this.pending === pending) {
         return;
       }
       pending = this.pending;
+      if (
+        (!options.captureUncommitted && pending.captureUncommitted !== this.captureUncommitted) ||
+        (!onlyIfChanged && pending.onlyIfChanged)
+      ) {
+        pending = {
+          promise: this.refreshTargets(captureUncommitted, onlyIfChanged, options.roots),
+          captureUncommitted,
+          onlyIfChanged,
+        };
+        this.pending = pending;
+      }
     }
   }
-  private async refreshTargets(): Promise<void> {
+  private async refreshTargets(
+    captureUncommitted: CaptureUncommitted,
+    onlyIfChanged: boolean,
+    roots: ReadonlySet<string> | undefined,
+  ): Promise<void> {
     const generation = ++this.generation;
     const targets = await this.targets();
     const keys = new Set<string>();
-    await this.refreshUncommittedTargets(targets, keys);
+    await this.refreshUncommittedTargets(targets, keys, captureUncommitted, roots);
     for (const [key, comments] of groupBy(
       targets.filter((target) => !target.uncommitted),
       comparisonKey,
     )) {
       const comment = comments[0];
       if (!comment || !this.access.isKnown(comment.repoRoot)) {
+        continue;
+      }
+      if (onlyIfChanged) {
+        if (this.keys.has(key)) {
+          keys.add(key);
+        }
         continue;
       }
       let rewritten = this.keys.has(key);
@@ -83,15 +112,34 @@ export class RewrittenComments implements vscode.Disposable {
       }
     }
     if (generation === this.generation) {
+      const changed =
+        this.notificationRequired || keys.size !== this.keys.size || [...keys].some((key) => !this.keys.has(key));
       this.keys = keys;
-      this.changed.fire();
+      if (changed) {
+        this.notificationRequired = false;
+        this.changed.fire();
+      }
     }
   }
-  private async refreshUncommittedTargets(targets: readonly RewrittenTarget[], keys: Set<string>): Promise<void> {
+  private async refreshUncommittedTargets(
+    targets: readonly RewrittenTarget[],
+    keys: Set<string>,
+    captureUncommitted: CaptureUncommitted,
+    roots: ReadonlySet<string> | undefined,
+  ): Promise<void> {
     const uncommitted = targets.filter((target) => target.uncommitted && this.access.isKnown(target.repoRoot));
     for (const [repo, saved] of groupBy(uncommitted, (target) => target.repoRoot)) {
+      if (roots && !roots.has(repo)) {
+        for (const target of saved) {
+          const key = comparisonKey(target);
+          if (this.keys.has(key)) {
+            keys.add(key);
+          }
+        }
+        continue;
+      }
       try {
-        const current = await this.captureUncommitted(this.access.client(repo));
+        const current = await captureUncommitted(this.access.client(repo));
         for (const target of saved) {
           if (
             target.uncommitted &&
