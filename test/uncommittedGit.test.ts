@@ -1,14 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, readFile, readdir, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import { join, dirname, relative, isAbsolute } from 'node:path';
+import timers from 'node:timers/promises';
 import os, { tmpdir } from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
+import * as gitCommands from '../src/git/client';
 import { GitClient, GitError, runGit } from '../src/git/client';
 import { createUncommittedChanges } from '../src/git/uncommitted';
 import { isUncommittedChanged, type UncommittedChanges, type UncommittedKind } from '../src/core/uncommitted';
 import { deserialize, serialize } from '../src/core/model';
 import { isRecord } from '../src/core/validation';
-import { repository, temporaryDirectory, gitProcesses, reviewComment } from './fixtures';
+import {
+  repository,
+  temporaryDirectory,
+  gitProcesses,
+  reviewComment,
+  waitFor,
+  ASYNC_TEST_TIMEOUT_MS,
+} from './fixtures';
 import { commitAll, gitAsAuthor } from './gitFixtures';
 
 const CREATED_AT = '2026-11-14T00:00:00Z';
@@ -16,6 +25,8 @@ const ORIGINAL = 'one\ntwo\nthree\nfour\nfive\n';
 beforeEach(() => {
   vi.stubEnv('GIT_CONFIG_GLOBAL', process.platform === 'win32' ? 'NUL' : '/dev/null');
   vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+  vi.spyOn(timers, 'setTimeout').mockResolvedValue(undefined);
+  syncBuiltinESMExports();
 });
 async function base() {
   const fixture = await repository();
@@ -55,10 +66,16 @@ async function state(git: GitClient) {
 }
 async function snapshot(git: GitClient) {
   const before = await state(git);
+  const temporaryRoot = await temporaryDirectory();
+  const temporary = vi.spyOn(os, 'tmpdir').mockReturnValue(temporaryRoot);
+  syncBuiltinESMExports();
   const processes = gitProcesses();
   const start = processes.mock.calls.length;
+  let completed = false;
   try {
-    return await createUncommittedChanges(git, CREATED_AT);
+    const changes = await createUncommittedChanges(git, CREATED_AT);
+    completed = true;
+    return changes;
   } finally {
     expect(await state(git)).toEqual(before);
     const indexes = processes.mock.calls.slice(start).flatMap((call) => {
@@ -69,12 +86,17 @@ async function snapshot(git: GitClient) {
       const index = options.env.GIT_INDEX_FILE;
       return typeof index === 'string' ? [index] : [];
     });
-    expect(indexes.length).toBeGreaterThan(0);
+    if (completed) {
+      expect(indexes.length).toBeGreaterThan(0);
+    }
+    expect(await readdir(temporaryRoot)).toEqual([]);
     for (const index of new Set(indexes)) {
       const inside = relative(tmpdir(), index);
       expect(isAbsolute(inside) || inside.split(/[\\/]/).includes('..')).toBe(false);
       await expect(readdir(dirname(index))).rejects.toMatchObject({ code: 'ENOENT' });
     }
+    temporary.mockRestore();
+    syncBuiltinESMExports();
   }
 }
 function saved(changes: UncommittedChanges, kind: UncommittedKind) {
@@ -87,6 +109,194 @@ function saved(changes: UncommittedChanges, kind: UncommittedKind) {
 }
 
 describe('未コミットのスナップショット', () => {
+  it(
+    '再試行は 100 ms・300 ms の待機が完了するまで次の取得を始めない',
+    async () => {
+      const { git } = await base();
+      let release!: () => void;
+      const sleep = vi.spyOn(timers, 'setTimeout').mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve(undefined);
+          }),
+      );
+      syncBuiltinESMExports();
+      const head = vi.spyOn(git, 'head');
+      const original = gitCommands.runGit;
+      let failures = 0;
+      vi.spyOn(gitCommands, 'runGit').mockImplementation(async (repo, args, input, options) => {
+        if (args[0] === 'add' && options?.env?.GIT_INDEX_FILE && failures++ < 2) {
+          throw new GitError(
+            args,
+            'error: short read while indexing src/a.ts\nerror: src/a.ts: failed to insert into database\nfatal: updating files failed',
+            128,
+          );
+        }
+        return original(repo, args, input, options);
+      });
+      const pending = snapshot(git);
+      try {
+        await waitFor(() => expect(sleep, '初回失敗後に100 ms待つ').toHaveBeenCalledTimes(1));
+        expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([100]);
+        expect(head).toHaveBeenCalledTimes(1);
+        release();
+        await waitFor(() => expect(sleep, '2回目の失敗後に300 ms待つ').toHaveBeenCalledTimes(2));
+        expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([100, 300]);
+        expect(head).toHaveBeenCalledTimes(2);
+      } finally {
+        // 途中で失敗しても後続の待機を残さず、元の失敗を上書きしないよう結果は待たない。
+        sleep.mockResolvedValue(undefined);
+        release?.();
+        void pending.catch(() => undefined);
+      }
+      const changes = await pending;
+      expect(changes.staged.files).toEqual([]);
+      expect(changes.unstaged.files).toEqual([]);
+      expect(head).toHaveBeenCalledTimes(3);
+    },
+    ASYNC_TEST_TIMEOUT_MS * 3,
+  );
+  it.each(['add', 'write-tree', 'head'])(
+    'short read の次の %s の失敗をそのまま返し、再試行を止める',
+    async (command) => {
+      const { git } = await base();
+      const error = new GitError([command], 'permission denied', 128);
+      const original = gitCommands.runGit;
+      const originalHead = git.head.bind(git);
+      let failed = false;
+      let attempts = 0;
+      vi.spyOn(git, 'head').mockImplementation(async () => {
+        attempts++;
+        if (failed && command === 'head') {
+          throw error;
+        }
+        return originalHead();
+      });
+      vi.spyOn(gitCommands, 'runGit').mockImplementation(async (repo, args, input, options) => {
+        if (failed && args[0] === command) {
+          throw error;
+        }
+        if (!failed && args[0] === 'add' && options?.env?.GIT_INDEX_FILE) {
+          failed = true;
+          throw new GitError(args, 'short read while indexing src/a.ts', 128);
+        }
+        return original(repo, args, input, options);
+      });
+      await expect(snapshot(git)).rejects.toBe(error);
+      expect(attempts).toBe(2);
+      expect(vi.mocked(timers.setTimeout).mock.calls.map(([delay]) => delay)).toEqual([100]);
+    },
+  );
+  it.each([0, 1, 2, 3])('short read が %i 回続いた場合の取得と後始末', async (failures) => {
+    const { directory, git } = await base();
+    await writeFile(join(directory, 'src/a.ts'), 'latest');
+    const original = gitCommands.runGit;
+    const indexes: string[] = [];
+    const errors = Array.from(
+      { length: failures },
+      () => new GitError(['add', '-A'], 'short read while indexing src/a.ts', 128),
+    );
+    let failed = 0;
+    vi.spyOn(gitCommands, 'runGit').mockImplementation(async (repo, args, input, options) => {
+      if (args[0] === 'add' && options?.env?.GIT_INDEX_FILE) {
+        indexes.push(options.env.GIT_INDEX_FILE);
+        const error = errors[failed++];
+        if (error) {
+          throw error;
+        }
+      }
+      return original(repo, args, input, options);
+    });
+    if (failures === 3) {
+      await expect(snapshot(git)).rejects.toBe(errors.at(-1));
+    } else {
+      const changes = await snapshot(git);
+      expect((await git.content(changes.unstaged.commit.hash, 'src/a.ts')).text).toBe('latest');
+      expect(changes.staged.files).toEqual([]);
+    }
+    expect(vi.mocked(timers.setTimeout).mock.calls.map(([delay]) => delay)).toEqual(
+      [100, 300].slice(0, Math.min(failures, 2)),
+    );
+    expect(indexes).toHaveLength(Math.min(failures + 1, 3));
+    expect(new Set(indexes).size).toBe(indexes.length);
+    for (const index of indexes) {
+      await expect(readdir(dirname(index))).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+  });
+  it.each([
+    ['add', 'permission denied', true],
+    ['add', 'failed to insert into database', true],
+    ['write-tree', 'short read while indexing src/a.ts', true],
+    ['add', 'short read while indexing src/a.ts', false],
+  ])('%s: %s (GitError=%s) は再試行しない', async (command, message, typed) => {
+    const { git } = await base();
+    const original = gitCommands.runGit;
+    const error = typed ? new GitError([command], message, 128) : new Error(message);
+    let failures = 0;
+    vi.spyOn(gitCommands, 'runGit').mockImplementation(async (repo, args, input, options) => {
+      if (args[0] === command) {
+        failures++;
+        throw error;
+      }
+      return original(repo, args, input, options);
+    });
+    await expect(snapshot(git)).rejects.toBe(error);
+    expect(failures).toBe(1);
+    expect(timers.setTimeout).not.toHaveBeenCalled();
+  });
+  it('HEAD 取得の失敗は再試行せず返す', async () => {
+    const { git } = await base();
+    const error = new GitError(['rev-parse'], 'short read while indexing src/a.ts', 128);
+    const head = vi.spyOn(git, 'head').mockRejectedValue(error);
+    await expect(snapshot(git)).rejects.toBe(error);
+    expect(head).toHaveBeenCalledTimes(1);
+    expect(timers.setTimeout).not.toHaveBeenCalled();
+  });
+  it('HEAD も index もない状態でも short read から回復する', async () => {
+    const { git, directory } = await repository();
+    await writeFile(join(directory, 'new'), 'untracked');
+    const original = gitCommands.runGit;
+    let failed = false;
+    vi.spyOn(gitCommands, 'runGit').mockImplementation(async (repo, args, input, options) => {
+      if (args[0] === 'add' && options?.env?.GIT_INDEX_FILE && !failed) {
+        failed = true;
+        throw new GitError(args, 'short read while indexing new', 128);
+      }
+      return original(repo, args, input, options);
+    });
+    const changes = await snapshot(git);
+    expect(changes.head).toBeUndefined();
+    expect(changes.staged.files).toEqual([]);
+    expect((await git.content(changes.unstaged.commit.hash, 'new')).text).toBe('untracked');
+  });
+  it('部分更新した一時 index を捨て、HEAD と実 index を取り直す', async () => {
+    const { directory, git } = await base();
+    await writeFile(join(directory, 'src/a.ts'), 'partial');
+    const original = gitCommands.runGit;
+    let failed = false;
+    let head: string | undefined;
+    vi.spyOn(gitCommands, 'runGit').mockImplementation(async (repo, args, input, options) => {
+      if (args[0] === 'add' && options?.env?.GIT_INDEX_FILE && !failed) {
+        failed = true;
+        await original(repo, args, input, options);
+        await commitAll(directory, 'new head');
+        head = await git.head();
+        await writeFile(join(directory, 'src/a.ts'), 'new staged');
+        await original(directory, ['add', 'src/a.ts']);
+        await writeFile(join(directory, 'src/a.ts'), 'new working');
+        throw new GitError(args, 'short read while indexing src/a.ts', 128);
+      }
+      return original(repo, args, input, options);
+    });
+    const changes = await createUncommittedChanges(git, CREATED_AT);
+    expect(changes.head).toBe(head);
+    expect((await git.content(changes.staged.commit.hash, 'src/a.ts')).text).toBe('new staged');
+    expect((await git.content(changes.unstaged.parent, 'src/a.ts')).text).toBe('new staged');
+    expect((await git.content(changes.unstaged.commit.hash, 'src/a.ts')).text).toBe('new working');
+    expect((await runGit(directory, ['show', ':src/a.ts'])).toString()).toBe('new staged');
+    expect(await readFile(join(directory, 'src/a.ts'), 'utf8')).toBe('new working');
+    expect(await git.head()).toBe(head);
+  });
   it('HEAD と index がなくても空の一覧と空 tree を返す', async () => {
     const { git } = await repository();
     const changes = await snapshot(git);
