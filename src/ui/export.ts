@@ -12,7 +12,7 @@ import { groupBy } from '../core/collections';
 import { shortHash, escapeIcons, replaceDisplayControls, UNCOMMITTED_LABEL } from '../core/presentation';
 import { exportMarkdown, exportJson, UNKNOWN_VALUE } from '../core/export';
 import { isRecord, isPositiveInteger } from '../core/validation';
-import { showError, showStatus } from './common';
+import { showError, showInfo, showStatus } from './common';
 import type { RepositoryAccess } from './repositories';
 export interface ExportRequest {
   scope: 'all' | 'unresolved' | 'pullRequest' | 'uncommitted';
@@ -123,8 +123,8 @@ export async function exportComments(
     (
       await vscode.window.showQuickPick(
         [
-          { label: 'Markdown', format: 'markdown' },
-          { label: 'JSON', format: 'json' },
+          { label: 'Markdown', format: 'markdown' as const },
+          { label: 'JSON', format: 'json' as const },
         ],
         { title: 'エクスポート形式' },
       )
@@ -132,8 +132,38 @@ export async function exportComments(
   if (!format) {
     return;
   }
+  const content = await exportContent(selected, access, format, rewritten, currentRepo);
+  const doc = await vscode.workspace.openTextDocument({ content, language: format === 'json' ? 'json' : 'markdown' });
+  await vscode.window.showTextDocument(doc);
+  await copyContent(content);
+}
+
+export async function copyInstructions(
+  comments: readonly ReviewComment[],
+  access: RepositoryAccess,
+  rewritten: (comment: ReviewComment) => boolean,
+): Promise<void> {
+  if (!comments.length) {
+    showInfo('コピー対象の未解決コメントがありません');
+    return;
+  }
+  await copyContent(await exportContent(comments, access, 'markdown', rewritten));
+}
+
+async function copyContent(content: string): Promise<void> {
+  await vscode.env.clipboard.writeText(content);
+  showStatus('コメントをクリップボードにコピーしました');
+}
+
+async function exportContent(
+  comments: readonly ReviewComment[],
+  access: RepositoryAccess,
+  format: ExportRequest['format'],
+  rewritten?: (comment: ReviewComment) => boolean,
+  currentRepo?: string,
+): Promise<string> {
   const branches = new Map<string, string>();
-  for (const repo of new Set([...selected.map((c) => c.repoRoot), ...(currentRepo ? [currentRepo] : [])])) {
+  for (const repo of new Set([...comments.map((c) => c.repoRoot), ...(currentRepo ? [currentRepo] : [])])) {
     if (!access.isKnown(repo)) {
       branches.set(repo, UNKNOWN_VALUE);
       continue;
@@ -151,12 +181,7 @@ export async function exportComments(
     const value: unknown = configuration.inspect(key)?.globalValue;
     return typeof value === 'string' ? value : '';
   });
-  const content =
-    format === 'json'
-      ? exportJson(selected, branches, instructions, questionInstructions, rewritten)
-      : exportMarkdown(selected, branches, instructions, questionInstructions, rewritten);
-  const doc = await vscode.workspace.openTextDocument({ content, language: format === 'json' ? 'json' : 'markdown' });
-  await vscode.window.showTextDocument(doc);
-  await vscode.env.clipboard.writeText(content);
-  showStatus('コメントをクリップボードにコピーしました');
+  return format === 'json'
+    ? exportJson(comments, branches, instructions, questionInstructions, rewritten)
+    : exportMarkdown(comments, branches, instructions, questionInstructions, rewritten);
 }

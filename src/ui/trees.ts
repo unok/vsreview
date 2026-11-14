@@ -1,7 +1,7 @@
 import { ChangedFileNodes, type ChangedFileNode } from './changedFileNodes';
 import { showRepositoryError, ChangedFiles, type RepositoryAccess } from './repositories';
 import type { ReviewComment } from '../core/model';
-import { commitKey, reviewGroupKey } from '../core/comparisons';
+import { commitKey, commentGroupKey } from '../core/comparisons';
 import * as vscode from 'vscode';
 import { basename } from 'node:path';
 import { displayedFileTree } from './fileView';
@@ -361,12 +361,7 @@ export class CommentsTree implements vscode.TreeDataProvider<CommentNode>, vscod
   }
   getChildren(node?: CommentNode): CommentNode[] {
     if (!node) {
-      // エクスポートでも使う reviewGroupKey の意味を変えず、このツリーだけ区分でまとめる。
-      return [
-        ...groupBy(this.comments(), (c) =>
-          c.uncommitted ? JSON.stringify([c.repoRoot, 'uncommitted', c.uncommitted.kind]) : reviewGroupKey(c),
-        ).values(),
-      ].map((comments) => {
+      return [...groupBy(this.comments(), commentGroupKey).values()].map((comments) => {
         const first = comments[0];
         return {
           kind: first?.uncommitted ? 'uncommittedGroup' : 'group',
