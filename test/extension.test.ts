@@ -166,6 +166,9 @@ describe('extension', () => {
       await waitFor(() =>
         expect(commands.executeCommand).toHaveBeenCalledWith('setContext', 'vsreview.isReviewDocument', false),
       );
+      // 起動時の履歴更新も Files の同期を要求するため、一覧更新を完了させてから
+      // このテストで扱うタブ変更の競合を作る。
+      await commands.executeCommand('vsreview.refresh');
       Object.assign(api.filesTree.view, { visible: true });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
