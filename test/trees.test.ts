@@ -244,6 +244,43 @@ describe('trees', () => {
     const currentFolder = (await tree.getChildren(currentGroup))[0]!;
     expect((await tree.getChildren(currentFolder)).map((node) => tree.getTreeItem(node).label)).toEqual(['a']);
   });
+  it('リポジトリ切り替えの待機中に旧リポジトリのファイルを選んでも切り替え先の一覧を表示する', async () => {
+    const first = await repository();
+    const second = await repository();
+    await writeFile(join(first.directory, 'a'), 'first');
+    await writeFile(join(second.directory, 'b'), 'second');
+    const access = await accessFor(first.directory);
+    await access.discover([workspaceFolder(first.directory), workspaceFolder(second.directory, 1)]);
+    const capture = vi.fn((git: GitClient) => createUncommittedChanges(git, '2026-11-14T00:00:00Z'));
+    const tree = new CommitsTree(() => [], access, new ChangedFiles(access), capture);
+    disposeAfter(tree);
+    await tree.select(first.git);
+    const root = (await tree.getChildren())[0]!;
+    const group = (await tree.getChildren(root))[0]!;
+    const target = (await tree.getChildren(group))[0]!;
+    if (root.kind !== 'uncommitted' || target.kind !== 'file') {
+      throw new Error('uncommitted file expected');
+    }
+    const expected = await createUncommittedChanges(second.git, '2026-11-14T00:00:00Z');
+    let release!: (changes: UncommittedChanges) => void;
+    capture.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const pending = tree.select(second.git);
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    const refreshed = await tree.refreshUncommitted(target);
+    release(expected);
+    await pending;
+    expect(refreshed).toMatchObject({ repo: first.directory });
+    expect((await tree.getChildren())[0]).toMatchObject({
+      kind: 'uncommitted',
+      repo: second.directory,
+      changes: { unstaged: { commit: { hash: expected.unstaged.commit.hash } } },
+    });
+  });
   it.each(['other repository', 'newer reload'])('refreshUncommittedは%sの現在表示を上書きしない', async (scenario) => {
     const first = await repository();
     const second = await repository();
