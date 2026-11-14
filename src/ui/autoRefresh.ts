@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { RefreshQueue } from '../core/refreshQueue';
-import { shortHash } from '../core/presentation';
+import { shortHash, uncommittedLabel, UNCOMMITTED_CHANGED_LABEL } from '../core/presentation';
 import { comparisonKey } from '../core/comparisons';
 import { showError, showStatus } from './common';
 import type { RepositoryAccess } from './repositories';
@@ -88,9 +88,11 @@ export class AutoRefresh implements vscode.Disposable {
       current.add(key);
       if (!this.notified.has(key)) {
         showStatus(
-          target.pullRequest
-            ? `開いている差分の PR #${target.pullRequest.number}（${shortHash(target.commit)}）は書き換え済みです`
-            : `開いている差分のコミット ${shortHash(target.commit)} は書き換え済みです`,
+          target.uncommitted
+            ? `開いている差分の${uncommittedLabel(target.uncommitted.kind)}は${UNCOMMITTED_CHANGED_LABEL}です`
+            : target.pullRequest
+              ? `開いている差分の PR #${target.pullRequest.number}（${shortHash(target.commit)}）は書き換え済みです`
+              : `開いている差分のコミット ${shortHash(target.commit)} は書き換え済みです`,
         );
       }
     }

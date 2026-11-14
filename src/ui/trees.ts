@@ -15,6 +15,9 @@ import {
   locationLabel,
   commentCountLabel,
   rewrittenSuffix,
+  uncommittedChangedSuffix,
+  snapshotDateLabel,
+  commentExcerpt,
 } from '../core/presentation';
 import type { RewrittenComments } from './rewritten';
 import type { UncommittedChanges, UncommittedChange, UncommittedSnapshot } from '../core/uncommitted';
@@ -282,11 +285,19 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
 }
 export type CommentNode =
   | { kind: 'group'; label: string; comments: ReviewComment[] }
+  | { kind: 'uncommittedGroup'; label: string; comments: ReviewComment[] }
+  | { kind: 'uncommittedSnapshot'; label: string; hash: string; comments: ReviewComment[] }
   | { kind: 'file'; label: string; comments: ReviewComment[] }
   | { kind: 'comment'; comment: ReviewComment };
 export function commentContextValue(node: Exclude<CommentNode, { kind: 'comment' }>) {
   if (node.kind === 'file') {
     return 'commentFile';
+  }
+  if (node.kind === 'uncommittedSnapshot') {
+    return 'commentUncommittedSnapshot';
+  }
+  if (node.kind === 'uncommittedGroup' || node.comments.some((c) => c.uncommitted)) {
+    return 'commentUncommittedGroup';
   }
   return node.comments[0]?.pullRequest ? 'commentPullRequestGroup' : 'commentCommitGroup';
 }
@@ -308,13 +319,21 @@ export class CommentsTree implements vscode.TreeDataProvider<CommentNode>, vscod
     if (node.kind !== 'comment') {
       const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Collapsed);
       item.contextValue = commentContextValue(node);
-      item.description = `${commentCountLabel(node.comments.length)}${rewrittenSuffix(node.comments.some((c) => this.rewritten.has(c)))}`;
+      const changed = node.comments.some((c) => this.rewritten.has(c));
+      const suffix = node.comments.some((c) => c.uncommitted)
+        ? uncommittedChangedSuffix(changed)
+        : rewrittenSuffix(changed);
+      item.description = `${commentCountLabel(node.comments.length)}${suffix}`;
+      if (node.kind === 'uncommittedSnapshot') {
+        item.description = `${shortHash(node.hash)} · ${item.description}`;
+        item.tooltip = node.hash;
+      }
       return item;
     }
     const c = node.comment;
     const item = new vscode.TreeItem(c.body.split(/\r?\n/).find((line) => line.trim()) ?? 'コメント');
-    item.description = `${locationLabel(c)}${rewrittenSuffix(this.rewritten.has(c))}`;
-    item.tooltip = c.body;
+    item.description = `${locationLabel(c)}${c.uncommitted ? uncommittedChangedSuffix(this.rewritten.has(c)) : rewrittenSuffix(this.rewritten.has(c))}`;
+    item.tooltip = c.uncommitted && c.side !== 'file' ? `${c.body}\n\n${commentExcerpt(c)}` : c.body;
     item.contextValue = 'comment';
     item.iconPath = new vscode.ThemeIcon(c.resolved ? 'pass' : 'comment');
     item.command = { command: 'vsreview.openComment', title: '差分を開く', arguments: [c] };
@@ -322,22 +341,47 @@ export class CommentsTree implements vscode.TreeDataProvider<CommentNode>, vscod
   }
   getChildren(node?: CommentNode): CommentNode[] {
     if (!node) {
-      return [...groupBy(this.comments(), reviewGroupKey).values()].map((comments) => {
+      // エクスポートでも使う reviewGroupKey の意味を変えず、このツリーだけ区分でまとめる。
+      return [
+        ...groupBy(this.comments(), (c) =>
+          c.uncommitted ? JSON.stringify([c.repoRoot, 'uncommitted', c.uncommitted.kind]) : reviewGroupKey(c),
+        ).values(),
+      ].map((comments) => {
         const first = comments[0];
         return {
-          kind: 'group',
+          kind: first?.uncommitted ? 'uncommittedGroup' : 'group',
           label: first
             ? first.pullRequest
               ? `${basename(first.repoRoot)} · PR #${first.pullRequest.number} ${replaceDisplayControls(first.pullRequest.title)}`
               : first.uncommitted
-                ? `${basename(first.repoRoot)} · ${uncommittedLabel(first.uncommitted.kind)} · ${relativeDate(first.uncommitted.createdAt)}`
+                ? `${basename(first.repoRoot)} · ${uncommittedLabel(first.uncommitted.kind)}`
                 : `${basename(first.repoRoot)} · ${shortHash(first.commit)} ${first.subject}`
             : '',
           comments,
         };
       });
     }
-    if (node.kind === 'group') {
+    if (node.kind === 'uncommittedGroup') {
+      return [...groupBy(node.comments, commitKey).values()].flatMap((comments) => {
+        const first = comments[0];
+        if (!first) {
+          return [];
+        }
+        const dates = comments.flatMap((c) =>
+          c.uncommitted && Number.isFinite(Date.parse(c.uncommitted.createdAt)) ? [c.uncommitted.createdAt] : [],
+        );
+        dates.sort((a, b) => Date.parse(a) - Date.parse(b));
+        return [
+          {
+            kind: 'uncommittedSnapshot' as const,
+            hash: first.commit,
+            label: snapshotDateLabel(dates[0] ?? ''),
+            comments,
+          },
+        ];
+      });
+    }
+    if (node.kind === 'group' || node.kind === 'uncommittedSnapshot') {
       return [...groupBy(node.comments, (c) => c.path)].map(([label, comments]) => ({ kind: 'file', label, comments }));
     }
     if (node.kind === 'file') {

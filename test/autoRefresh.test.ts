@@ -31,6 +31,7 @@ import { RewrittenComments, rewrittenTargets } from '../src/ui/rewritten';
 import { revisionUri } from '../src/ui/revisions';
 import { commitAll } from './gitFixtures';
 import { GitClient, runGit } from '../src/git/client';
+import { createUncommittedChanges } from '../src/git/uncommitted';
 
 async function fixture() {
   const { directory, git } = await repository();
@@ -55,6 +56,39 @@ async function fixture() {
   return { directory, git, access, commits, rewritten, comments, auto, comment, commit, saved, documents };
 }
 describe('autoRefresh', () => {
+  it('変更済みの未コミット差分をHEADイベント後に一度だけ通知する', async () => {
+    const { directory, git, commits, rewritten, documents, auto } = await fixture();
+    await writeFile(join(directory, 'file'), 'saved');
+    const changes = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const target = {
+      repo: directory,
+      ...changes.unstaged,
+      file: changes.unstaged.files[0]!,
+      uncommitted: {
+        kind: 'unstaged' as const,
+        ...(changes.head ? { head: changes.head } : {}),
+        createdAt: changes.createdAt,
+      },
+    };
+    activateTab(new TabInputTextDiff(revisionUri(target, 'old'), revisionUri(target, 'new')));
+    await auto.rewatch({ refresh: false });
+    await writeFile(join(directory, 'file'), 'edited');
+    const settled = vi.fn();
+    rewritten.onDidChange(settled);
+    emitFileEvent(join(directory, '.git', 'HEAD'));
+    await waitFor(() =>
+      expect(window.setStatusBarMessage).toHaveBeenCalledWith(
+        'VSReview: 開いている差分の未コミットの変更（未ステージ）は内容が変更済みです',
+        5000,
+      ),
+    );
+    settled.mockClear();
+    emitFileEvent(join(directory, '.git', 'HEAD'));
+    await waitFor(() => expect(settled).toHaveBeenCalled());
+    expect(window.setStatusBarMessage).toHaveBeenCalledTimes(1);
+    expect((await documents.openDiffTargets())[0]?.commit).toBe(target.commit.hash);
+    expect(commits.git?.root).toBe(directory);
+  });
   it('HEADと共通refsを監視し、amend後の一覧・到達判定・開いた差分の通知を更新する', async () => {
     const { directory, commit, commits, rewritten, comment, auto, saved } = await fixture();
     saved.length = 0;

@@ -750,6 +750,39 @@ describe('comments', () => {
     expect(service.all).toEqual([]);
     expect(state.writes).toHaveLength(1);
   });
+  it.each([false, true])('書き換え済みの種類別件数を示し、確定した対象だけ削除する: PR=%s', async (withPr) => {
+    const uncommitted = { ...saved, uncommitted: { kind: 'unstaged' as const, createdAt: saved.createdAt } };
+    const values = [
+      saved,
+      { ...uncommitted, id: 'u1' },
+      { ...uncommitted, id: 'u2' },
+      { ...uncommitted, id: 'unchanged' },
+      { ...saved, id: 'ordinary' },
+      ...(withPr
+        ? [
+            {
+              ...saved,
+              id: 'pr',
+              commit: pullRequestReview.headRefOid,
+              parent: pullRequestReview.mergeBase,
+              pullRequest: pullRequestReview,
+            },
+          ]
+        : []),
+    ];
+    state.value = serialize(values);
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    warning.mockResolvedValueOnce('削除');
+    await service.clearRewritten((c) => !['unchanged', 'ordinary'].includes(c.id));
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      `VSReview: 書き換え済みコミットのコメント 1 件、${withPr ? '書き換え済み PR のコメント 1 件、' : ''}内容が変更済みの未コミットのコメント 2 件を削除しますか？`,
+      { modal: true },
+      '削除',
+    );
+    expect(service.all.map((c) => c.id)).toEqual(['unchanged', 'ordinary']);
+    expect(deserialize(state.value).map((c) => c.id)).toEqual(['unchanged', 'ordinary']);
+  });
   it('文書を閉じるとスレッドを破棄し、再度開くと保存済み本文を復元する', async () => {
     const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
     await service.refresh();
