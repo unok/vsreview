@@ -25,7 +25,7 @@ import type * as vscode from 'vscode';
 import { targetFromComment } from '../src/core/documents';
 import { activate } from '../src/extension';
 import { describe, expect, it, vi } from 'vitest';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { commitAll } from './gitFixtures';
 import { ReviewComments } from '../src/ui/comments';
@@ -35,7 +35,8 @@ import { RewrittenComments, rewrittenTargets } from '../src/ui/rewritten';
 import { registerReviewCommands, selectRepository, updateRepository } from '../src/ui/commands';
 import { registerCommand } from '../src/ui/common';
 import { revisionUri, RevisionProvider, documentRef } from '../src/ui/revisions';
-import { runGit } from '../src/git/client';
+import { GitClient, runGit } from '../src/git/client';
+import { createUncommittedChanges } from '../src/git/uncommitted';
 import {
   activateTab,
   TabInputTextDiff,
@@ -177,14 +178,99 @@ describe('commands', () => {
     expect((reopened[2] as vscode.Uri).toString()).toBe(right.toString());
     expect(reopened[4]).toMatchObject({ selection: new Range(2, 0, 2, 12) });
     expect((await workspace.openTextDocument(right)).getText()).toContain('new snapshot');
-    warning.mockResolvedValueOnce('削除');
+    warning.mockResolvedValueOnce(undefined);
     await commands.executeCommand('vsreview.clearRewrittenComments');
+    expect(warning).toHaveBeenCalledWith(
+      'VSReview: 内容が変更済みの未コミットのコメント 3 件を削除しますか？',
+      { modal: true },
+      '削除',
+    );
     expect(restored.comments.all).toHaveLength(3);
     expect(documentRef(right)?.uncommitted).toEqual(saved.uncommitted);
     await waitFor(async () => expect((await restored.commitsTree.getChildren())[0]?.kind).toBe('uncommitted'));
     await commands.executeCommand('vsreview.refresh');
     expect((await restored.commitsTree.getChildren())[0]?.kind).toBe('uncommitted');
     expect(restored.comments.all).toHaveLength(3);
+    const { commonDir } = await (await accessFor(directory)).client(directory).directories();
+    await rm(join(commonDir, 'objects', saved.commit.slice(0, 2), saved.commit.slice(2)));
+    const tree = window.createTreeView.mock.calls.filter(([id]) => id === 'vsreview.comments').at(-1)![1]
+      .treeDataProvider as CommentsTree;
+    expect(tree.getTreeItem({ kind: 'comment', comment: saved }).tooltip).toBe(`${saved.body}\n\n${saved.excerpt}`);
+    commands.executeCommand.mockClear();
+    await commands.executeCommand('vsreview.openComment', saved);
+    expect(window.showInformationMessage).toHaveBeenCalledWith(
+      expect.stringContaining('スナップショットのオブジェクトが見つからない'),
+    );
+    expect(commands.executeCommand.mock.calls.some(([name]) => name === 'vscode.diff')).toBe(false);
+    expect(window.showErrorMessage).not.toHaveBeenCalled();
+  });
+  it('削除コマンドは作業ツリーの最新状態を判定し、変更済みだけを削除する', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a'), 'base');
+    await commitAll(directory, 'base');
+    const initial = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const saved = {
+      ...reviewComment,
+      repoRoot: directory,
+      commit: initial.unstaged.commit.hash,
+      parent: initial.unstaged.parent,
+      uncommitted: { kind: 'unstaged' as const, createdAt: initial.createdAt },
+    };
+    await writeFile(join(directory, 'a'), 'edited');
+    const current = await createUncommittedChanges(git, '2026-11-14T01:00:00Z');
+    const state = new MemoryState();
+    state.value = serialize([
+      saved,
+      { ...saved, id: 'second' },
+      { ...saved, id: 'unchanged', commit: current.unstaged.commit.hash, parent: current.unstaged.parent },
+      { ...reviewComment, id: 'rewritten', repoRoot: directory },
+      { ...reviewComment, id: 'reachable', repoRoot: directory, commit: (await git.head())! },
+    ]);
+    workspace.workspaceFolders = [workspaceFolder(directory)];
+    globalConfiguration.set('vsreview.autoRefresh', false);
+    const api = (await activate(extensionContext(state)))!;
+    warning.mockResolvedValueOnce('削除');
+    await commands.executeCommand('vsreview.clearRewrittenComments');
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      'VSReview: 書き換え済みコミットのコメント 1 件、内容が変更済みの未コミットのコメント 2 件を削除しますか？',
+      { modal: true },
+      '削除',
+    );
+    expect(api.comments.all.map((c) => c.id)).toEqual(['unchanged', 'reachable']);
+    // 削除後に始まる判定を回収し、fixture の破棄と競合させない。
+    await commands.executeCommand('vsreview.refresh');
+  });
+  it('変更済み判定後に内容を戻し、取得が失敗したら削除の確認も保存もしない', async () => {
+    const { directory, api, state, unstaged } = await uncommittedFixture();
+    input.mockResolvedValueOnce('保存するコメント');
+    await commands.executeCommand('vsreview.addFileComment', unstaged);
+    // 追加後の非同期判定を終えてから、取得失敗を注入する。
+    await commands.executeCommand('vsreview.refresh');
+    const saved = [...api.comments.all];
+    expect(saved).toHaveLength(1);
+    await writeFile(join(directory, 'a.ts'), 'edited');
+    warning.mockResolvedValueOnce(undefined);
+    await commands.executeCommand('vsreview.clearRewrittenComments');
+    expect(warning).toHaveBeenCalledWith(
+      'VSReview: 内容が変更済みの未コミットのコメント 1 件を削除しますか？',
+      { modal: true },
+      '削除',
+    );
+    await writeFile(join(directory, 'a.ts'), 'ONE\ntwo\nthree\nfour\nFIVE\n');
+    const writes = [...state.writes];
+    const head = vi.spyOn(GitClient.prototype, 'head').mockRejectedValue(new Error('snapshot unavailable'));
+    warning.mockClear().mockResolvedValueOnce('削除');
+    try {
+      await commands.executeCommand('vsreview.clearRewrittenComments');
+      expect(window.showErrorMessage).toHaveBeenCalledWith('VSReview: snapshot unavailable');
+      expect(warning).not.toHaveBeenCalled();
+      expect(api.comments.all).toEqual(saved);
+      expect(state.writes).toEqual(writes);
+    } finally {
+      head.mockRestore();
+      // 失敗経路でも進行中の判定を回収してから fixture を破棄する。
+      await commands.executeCommand('vsreview.refresh');
+    }
   });
   describe('レビューコマンド', () => {
     it('コマンド入口は不正引数を拒否し、検出済み差分へのコメントだけ保存する', async () => {
@@ -719,6 +805,34 @@ function commentFile(tree: CommentsTree, id: string, path: string) {
 }
 
 describe('コメントノードの一括削除コマンド', () => {
+  it('未コミットの各グループではコミット削除を拒否し、ファイル削除はSHAも区別する', async () => {
+    const { api, tree, first, state } = await setupCommentNodes((c) => [
+      { ...c, id: 's1', commit: 'e'.repeat(40), uncommitted: { kind: 'staged', createdAt: c.createdAt } },
+      { ...c, id: 's2', commit: 'd'.repeat(40), uncommitted: { kind: 'staged', createdAt: c.createdAt } },
+    ]);
+    const group = tree.getChildren().find((node) => node.kind === 'uncommittedGroup')!;
+    const snapshots = tree.getChildren(group);
+    for (const node of [
+      group,
+      ...snapshots,
+      { kind: 'group', label: '', comments: [api.comments.all.find((c) => c.id === 's1')!] },
+    ]) {
+      await commands.executeCommand('vsreview.clearCommitComments', node);
+    }
+    expect(warning).not.toHaveBeenCalled();
+    expect(state.writes).toEqual([]);
+    warning.mockResolvedValueOnce('削除');
+    await commands.executeCommand('vsreview.clearFileComments', tree.getChildren(snapshots[0])[0]);
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      'VSReview: このファイルのコメント 1 件を削除しますか？',
+      { modal: true },
+      '削除',
+    );
+    expect(api.comments.all.some((c) => c.id === 's1')).toBe(false);
+    expect(api.comments.all.some((c) => c.id === 's2' && c.path === first.path)).toBe(true);
+    // 削除後に始まる判定を回収し、fixture の破棄と競合させない。
+    await commands.executeCommand('vsreview.refresh');
+  });
   it.each([
     [
       'clearCommitComments',

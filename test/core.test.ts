@@ -5,10 +5,19 @@ import { reviewComment as comment } from './fixtures';
 import { describe, expect, it } from 'vitest';
 import { fileSide, parseLog, parseNameStatus, parseTree } from '../src/core/gitParsing';
 import { mapLine, parseHunks, excerpt } from '../src/core/diff';
+import { snapshotDateLabel, commentExcerpt, uncommittedChangedSuffix } from '../src/core/presentation';
 
 const patch = '@@ -2,3 +2,4 @@ function x\n context\n-old\n+new\n+extra\n tail\n\\ No newline at end of file\n';
 
 describe('core', () => {
+  it('スナップショットのローカル日時・変更表示・抜粋を整形する', () => {
+    expect(snapshotDateLabel(new Date(2026, 0, 2, 3, 4, 5).toISOString())).toBe('2026-01-02 03:04:05');
+    expect(snapshotDateLabel('bad')).toBe('日時不明');
+    expect(uncommittedChangedSuffix(true)).toBe(' · 内容が変更済み');
+    expect(uncommittedChangedSuffix(false)).toBe('');
+    expect(commentExcerpt(comment)).toBe(comment.excerpt);
+    expect(commentExcerpt({ ...comment, excerpt: '' })).toBe(`${comment.hunkHeader}\n${comment.code}`);
+  });
   describe('変更マップ', () => {
     it('各側に存在するパスだけ変更マップへ入れ、コピー元自身の変更を優先する', () => {
       const modified = { status: 'M' as const, path: 'source' };

@@ -12,7 +12,7 @@ import { targetFromComment } from '../src/core/documents';
 import { ChangedFiles } from '../src/ui/repositories';
 import type * as vscode from 'vscode';
 import { describe, expect, it, vi } from 'vitest';
-import { writeFile, unlink, mkdir, rename } from 'node:fs/promises';
+import { writeFile, unlink, mkdir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runGit } from '../src/git/client';
 import { commitAll, gitAsAuthor } from './gitFixtures';
@@ -33,6 +33,43 @@ import {
 } from './vscodeMock';
 
 describe('diff', () => {
+  it.each(['snapshot', 'unstaged parent', 'staged parent'] as const)(
+    '未コミットの%s消失を説明し、差分を開かない',
+    async (missing) => {
+      const { directory, git } = await repository();
+      await writeFile(join(directory, 'a'), 'base');
+      await commitAll(directory, 'base');
+      await writeFile(join(directory, 'a'), 'staged');
+      await runGit(directory, ['add', 'a']);
+      await writeFile(join(directory, 'a'), 'working');
+      const changes = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+      const kind = missing === 'staged parent' ? 'staged' : 'unstaged';
+      const change = changes[kind];
+      const hash = missing === 'snapshot' ? change.commit.hash : change.parent;
+      const { commonDir } = await git.directories();
+      await rm(join(commonDir, 'objects', hash.slice(0, 2), hash.slice(2)));
+      const access = await accessFor(directory);
+      const diff = new ReviewDiff(
+        reviewDocuments(access),
+        access,
+        new ChangedFiles(access),
+        { gh: unexpectedGh, remote: () => 'origin' },
+        { review: () => undefined },
+        archiveLease,
+      );
+      await diff.openDiff({
+        repo: directory,
+        ...change,
+        file: change.files[0]!,
+        uncommitted: { kind, ...(changes.head ? { head: changes.head } : {}), createdAt: changes.createdAt },
+      });
+      expect(window.showInformationMessage).toHaveBeenCalledWith(
+        expect.stringContaining('スナップショットのオブジェクトが見つからない'),
+      );
+      expect(commands.executeCommand.mock.calls.some(([name]) => name === 'vscode.diff')).toBe(false);
+      expect(window.showErrorMessage).not.toHaveBeenCalled();
+    },
+  );
   it.each(['rename', 'delete'])('未コミットの%sを旧パスと空の側を保って開く', async (operation) => {
     const { directory, git } = await repository();
     await writeFile(join(directory, 'old'), 'original');

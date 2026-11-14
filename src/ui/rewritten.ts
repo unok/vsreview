@@ -8,6 +8,10 @@ import { groupBy } from '../core/collections';
 import type { ReviewDocuments } from './documents';
 import type { RepositoryAccess } from './repositories';
 import { showError } from './common';
+import { createUncommittedChanges } from '../git/uncommitted';
+import { isUncommittedChanged, type UncommittedChanges } from '../core/uncommitted';
+import type { GitClient } from '../git/client';
+type CaptureUncommitted = (git: GitClient) => Promise<UncommittedChanges>;
 export type RewrittenTarget = Pick<ReviewComment, 'repoRoot' | 'commit'> & {
   parent?: string;
   pullRequest?: PullRequestComparison;
@@ -29,6 +33,9 @@ export class RewrittenComments implements vscode.Disposable {
     private readonly targets: () => Promise<readonly RewrittenTarget[]>,
     private readonly access: RepositoryAccess,
     private readonly pullRequestReviews: Pick<PullRequestReviews, 'latestHead'>,
+    // 削除前の判定を古くしないよう、CommitsTree の取得結果を再利用せず毎回取り直す。
+    private readonly captureUncommitted: CaptureUncommitted = (git) =>
+      createUncommittedChanges(git, new Date().toISOString()),
   ) {}
   has = (comment: RewrittenTarget): boolean => this.keys.has(comparisonKey(comment));
   async refresh(): Promise<void> {
@@ -46,7 +53,7 @@ export class RewrittenComments implements vscode.Disposable {
     const generation = ++this.generation;
     const targets = await this.targets();
     const keys = new Set<string>();
-    // 未コミットのスナップショットは参照を持たず、HEAD から到達できないため除く。
+    await this.refreshUncommittedTargets(targets, keys);
     for (const [key, comments] of groupBy(
       targets.filter((target) => !target.uncommitted),
       comparisonKey,
@@ -78,6 +85,25 @@ export class RewrittenComments implements vscode.Disposable {
     if (generation === this.generation) {
       this.keys = keys;
       this.changed.fire();
+    }
+  }
+  private async refreshUncommittedTargets(targets: readonly RewrittenTarget[], keys: Set<string>): Promise<void> {
+    const uncommitted = targets.filter((target) => target.uncommitted && this.access.isKnown(target.repoRoot));
+    for (const [repo, saved] of groupBy(uncommitted, (target) => target.repoRoot)) {
+      try {
+        const current = await this.captureUncommitted(this.access.client(repo));
+        for (const target of saved) {
+          if (
+            target.uncommitted &&
+            isUncommittedChanged({ commit: target.commit, uncommitted: target.uncommitted }, current)
+          ) {
+            keys.add(comparisonKey(target));
+          }
+        }
+      } catch (error) {
+        // 古い判定でコメントを削除しないよう、取得失敗時は変更済みのキーを加えない。
+        showError(error);
+      }
     }
   }
   dispose(): void {

@@ -7,7 +7,7 @@ import { RewrittenComments } from '../src/ui/rewritten';
 import { relativeDate } from '../src/core/presentation';
 import { describe, it, expect, vi } from 'vitest';
 import { writeFile, mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   waitFor,
   repository,
@@ -23,6 +23,93 @@ import { createUncommittedChanges } from '../src/git/uncommitted';
 import type { UncommittedChanges } from '../src/core/uncommitted';
 
 describe('trees', () => {
+  it('未コミットを区分・SHA・ファイルでまとめ、日時・変更済み・抜粋とメニューを表示する', async () => {
+    const { directory, git } = await repository();
+    const current = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const t1 = new Date(2026, 0, 2, 3, 4, 5);
+    const t2 = new Date(t1.getTime() + 500);
+    const staged = {
+      ...reviewComment,
+      repoRoot: directory,
+      uncommitted: { kind: 'staged' as const, createdAt: t2.toISOString() },
+    };
+    const unchanged = {
+      ...staged,
+      id: 'unchanged',
+      commit: current.unstaged.commit.hash,
+      uncommitted: { kind: 'unstaged' as const, createdAt: t1.toISOString() },
+    };
+    const changed = { ...unchanged, id: 'changed', commit: 'c'.repeat(40), excerpt: '' };
+    const comments = [
+      staged,
+      unchanged,
+      { ...staged, id: 'b', path: 'b.ts', uncommitted: { ...staged.uncommitted, createdAt: t1.toISOString() } },
+      changed,
+      { ...reviewComment, id: 'ordinary', repoRoot: directory },
+    ];
+    const rewritten = new RewrittenComments(
+      () => Promise.resolve(comments),
+      await accessFor(directory),
+      { latestHead: () => undefined },
+      () => Promise.resolve(current),
+    );
+    disposeAfter(rewritten);
+    const tree = new CommentsTree(() => comments, rewritten);
+    disposeAfter(tree);
+    await rewritten.refresh();
+    const groups = tree.getChildren();
+    expect(groups.map((node) => tree.getTreeItem(node).label)).toEqual([
+      `${basename(directory)} · 未コミットの変更（ステージ済み）`,
+      `${basename(directory)} · 未コミットの変更（未ステージ）`,
+      `${basename(directory)} · bbbbbbbb subject`,
+    ]);
+    expect(tree.getTreeItem(groups[0]!).contextValue).toBe('commentUncommittedGroup');
+    expect(tree.getTreeItem(groups[0]!).description).toBe('2 コメント · 内容が変更済み');
+    const snapshot = tree.getChildren(groups[0])[0]!;
+    expect(tree.getTreeItem(snapshot)).toMatchObject({
+      label: `${t1.getFullYear()}-01-02 03:04:05`,
+      description: 'bbbbbbbb · 2 コメント · 内容が変更済み',
+      tooltip: staged.commit,
+      contextValue: 'commentUncommittedSnapshot',
+    });
+    const files = tree.getChildren(snapshot);
+    expect(files.map((node) => tree.getTreeItem(node).label)).toEqual([reviewComment.path, 'b.ts']);
+    expect(tree.getTreeItem(files[0]!).contextValue).toBe('commentFile');
+    const leaf = tree.getChildren(files[0])[0]!;
+    expect(tree.getTreeItem(leaf)).toMatchObject({
+      description: 'new L3-L4 · 内容が変更済み',
+      tooltip: `${staged.body}\n\n${staged.excerpt}`,
+      command: { command: 'vsreview.openComment', arguments: [staged] },
+    });
+    const unstaged = tree.getChildren(groups[1]);
+    expect(unstaged).toHaveLength(2);
+    expect(tree.getTreeItem(unstaged[0]!).label).toBe(tree.getTreeItem(unstaged[1]!).label);
+    expect(tree.getTreeItem(unstaged[0]!).description).toBe(`${unchanged.commit.slice(0, 8)} · 1 コメント`);
+    expect(tree.getTreeItem(unstaged[1]!).description).toBe('cccccccc · 1 コメント · 内容が変更済み');
+    const changedLeaf = tree.getChildren(tree.getChildren(unstaged[1])[0])[0]!;
+    expect(tree.getTreeItem(changedLeaf).tooltip).toBe(`${changed.body}\n\n${changed.hunkHeader}\n${changed.code}`);
+    expect(tree.getTreeItem({ kind: 'comment', comment: { ...changed, side: 'file' } }).tooltip).toBe(changed.body);
+    expect(tree.getTreeItem({ kind: 'comment', comment: reviewComment }).tooltip).toBe(reviewComment.body);
+  });
+  it('不正な日時を除いて最古の日時を使い、有効な日時がなければ日時不明にする', async () => {
+    const { directory } = await repository();
+    const first = { ...reviewComment, repoRoot: directory, uncommitted: { kind: 'staged' as const, createdAt: 'bad' } };
+    const comments = [first];
+    const rewritten = new RewrittenComments(() => Promise.resolve([]), await accessFor(directory), {
+      latestHead: () => undefined,
+    });
+    const tree = new CommentsTree(() => comments, rewritten);
+    disposeAfter(rewritten);
+    disposeAfter(tree);
+    const label = () => tree.getTreeItem(tree.getChildren(tree.getChildren()[0])[0]!).label;
+    expect(label()).toBe('日時不明');
+    comments.push({
+      ...first,
+      id: 'valid',
+      uncommitted: { ...first.uncommitted, createdAt: new Date(2026, 0, 2, 3, 4, 5).toISOString() },
+    });
+    expect(label()).toBe('2026-01-02 03:04:05');
+  });
   it('未コミットを先頭で区分し、空グループ・ignoreを除き表示設定と件数を共有する', async () => {
     const { directory, git } = await repository();
     await mkdir(join(directory, 'src/ui'), { recursive: true });

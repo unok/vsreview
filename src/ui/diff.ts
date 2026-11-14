@@ -27,6 +27,14 @@ export class ReviewDiff {
   }
   private async showDiff(target: FileTarget, comment?: ReviewComment): Promise<void> {
     const git = this.access.client(target.repo);
+    if (target.uncommitted) {
+      // HEAD のない staged の親は空ツリーなので、コミットの存在確認から除く。
+      const checkParent = target.uncommitted.kind === 'unstaged' || target.uncommitted.head !== undefined;
+      if (!(await git.hasCommit(target.commit.hash)) || (checkParent && !(await git.hasCommit(target.parent)))) {
+        showInfo('保存したスナップショットのオブジェクトが見つからないため、差分を開けません');
+        return;
+      }
+    }
     if (target.pullRequest) {
       await restorePullRequestComparison(
         git,
