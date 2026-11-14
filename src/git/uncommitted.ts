@@ -15,6 +15,10 @@ const INDEX_FILE = 'index';
 // 一時 index の操作で sharedindex.* が gitDir に作られるのを防ぐ。
 const INDEX_CONFIG = ['core.splitIndex=false'];
 
+export type CaptureUncommitted = (git: GitClient) => Promise<UncommittedChanges>;
+export const captureUncommittedChanges: CaptureUncommitted = (git) =>
+  createUncommittedChanges(git, new Date().toISOString());
+
 export async function createUncommittedChanges(git: GitClient, createdAt: string): Promise<UncommittedChanges> {
   const head = await git.head();
   const temporary = await mkdtemp(join(tmpdir(), 'vsreview-index-'));

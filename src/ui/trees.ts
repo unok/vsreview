@@ -22,7 +22,7 @@ import {
 import type { RewrittenComments } from './rewritten';
 import type { UncommittedChanges, UncommittedChange, UncommittedSnapshot } from '../core/uncommitted';
 import { canonicalCommit, type FileTarget } from '../core/documents';
-import { createUncommittedChanges } from '../git/uncommitted';
+import { captureUncommittedChanges, type CaptureUncommitted } from '../git/uncommitted';
 import { UNCOMMITTED_LABEL, UNCOMMITTED_KIND_LABELS, uncommittedLabel } from '../core/presentation';
 import { showError, showStatus } from './common';
 
@@ -34,7 +34,6 @@ export type CommitNode =
   | { kind: 'more' }
   | { kind: 'uncommitted'; repo: string; changes: UncommittedChanges }
   | { kind: 'uncommittedGroup'; repo: string; change: UncommittedChange; uncommitted: UncommittedSnapshot };
-type CaptureUncommitted = (git: GitClient) => Promise<UncommittedChanges>;
 export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.Disposable {
   private readonly treeDataChanged = new vscode.EventEmitter<CommitNode | undefined>();
   readonly onDidChangeTreeData = this.treeDataChanged.event;
@@ -56,8 +55,7 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
     comments: () => readonly ReviewComment[],
     private readonly access: RepositoryAccess,
     private readonly changedFiles: ChangedFiles,
-    private readonly captureUncommitted: CaptureUncommitted = (git) =>
-      createUncommittedChanges(git, new Date().toISOString()),
+    private readonly captureUncommitted: CaptureUncommitted = captureUncommittedChanges,
   ) {
     this.files = new ChangedFileNodes(comments);
   }
@@ -76,7 +74,7 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
     this.selected = git;
     await this.reload();
   }
-  async reload(): Promise<void> {
+  async reload(options: { captureUncommitted?: CaptureUncommitted; onlyIfChanged?: boolean } = {}): Promise<void> {
     const git = this.selected;
     const generation = ++this.refreshGeneration;
     this.refreshing = true;
@@ -88,7 +86,7 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
       }
       let changes: UncommittedChanges | undefined;
       try {
-        changes = git ? await this.captureUncommitted(git) : undefined;
+        changes = git ? await (options.captureUncommitted ?? this.captureUncommitted)(git) : undefined;
       } catch (error) {
         // 未コミットの取得失敗で既存のコミット履歴まで隠さない。
         if (generation === this.refreshGeneration) {
@@ -99,6 +97,14 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
         return;
       }
       if (previousRoot === git?.root && revision === this.revision) {
+        if (
+          options.onlyIfChanged &&
+          this.uncommitted?.head === changes?.head &&
+          this.uncommitted?.staged.commit.hash === changes?.staged.commit.hash &&
+          this.uncommitted?.unstaged.commit.hash === changes?.unstaged.commit.hash
+        ) {
+          return;
+        }
         this.uncommitted = changes;
         this.rerender();
         return;
