@@ -191,6 +191,7 @@ export function registerReviewCommands(
     return exportComments(comments.all, access, {
       currentRepo: commitsTree.git?.root,
       request: isExportRequest(arg) ? arg : undefined,
+      rewritten: rewritten.has,
     });
   });
   command('openComment', (arg) => {

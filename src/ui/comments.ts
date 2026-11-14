@@ -4,7 +4,7 @@ import { PULL_REQUEST_REOPEN } from '../core/pullRequests';
 import type { PullRequestReviews } from './pullRequestReviews';
 import { comparisonKey } from '../core/comparisons';
 import { canonicalCommit, type FileTarget } from '../core/documents';
-import { selectComments, deserialize, serialize, type ReviewComment } from '../core/model';
+import { selectComments, deserialize, serialize, isCommitComment, type ReviewComment } from '../core/model';
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import { groupBy } from '../core/collections';
@@ -497,7 +497,7 @@ export class ReviewComments implements vscode.Disposable {
   async clearRewritten(predicate: (comment: ReviewComment) => boolean): Promise<void> {
     const targets = this.values.filter(predicate);
     const ids = new Set(targets.map((c) => c.id));
-    const commits = targets.filter((c) => !c.uncommitted && !c.pullRequest).length;
+    const commits = targets.filter(isCommitComment).length;
     const prs = targets.filter((c) => c.pullRequest).length;
     const uncommitted = targets.filter((c) => c.uncommitted).length;
     const counts = [
