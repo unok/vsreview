@@ -16,6 +16,7 @@ import {
   reviewComment,
   pullRequestReview,
 } from './fixtures';
+import { exportMarkdown } from '../src/core/export';
 import { AutoRefresh } from '../src/ui/autoRefresh';
 import { serialize, type ReviewComment } from '../src/core/model';
 import { GhClient } from '../src/git/gh';
@@ -24,7 +25,7 @@ import { FilesTree } from '../src/ui/files';
 import type * as vscode from 'vscode';
 import { targetFromComment } from '../src/core/documents';
 import { activate } from '../src/extension';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { commitAll } from './gitFixtures';
@@ -52,6 +53,7 @@ import {
   window,
   pick,
   globalConfiguration,
+  workspaceConfiguration,
   workspace,
   Uri,
   input,
@@ -79,8 +81,17 @@ describe('commands', () => {
       uncommitted: { kind: 'unstaged' as const, createdAt: snapshot.createdAt },
     };
     delete saved.oldPath;
+    await writeFile(join(directory, 'file'), 'edited');
+    const current = await createUncommittedChanges(git, '2026-11-15T00:00:00Z');
+    const unchanged = {
+      ...saved,
+      id: 'unchanged',
+      commit: current.unstaged.commit.hash,
+      parent: current.unstaged.parent,
+      uncommitted: { ...saved.uncommitted, createdAt: current.createdAt },
+    };
     const state = new MemoryState();
-    state.value = serialize([saved]);
+    state.value = serialize([saved, unchanged]);
     const access = await accessFor(directory);
     const documents = reviewDocuments(access);
     const comments = new ReviewComments(state, () => {}, documents, access, { review: () => undefined });
@@ -117,20 +128,34 @@ describe('commands', () => {
         archiveLease,
       ),
     });
-    await writeFile(join(directory, 'file'), 'edited');
     await rewritten.refresh();
     expect(rewritten.has(saved)).toBe(true);
+    expect(rewritten.has(unchanged)).toBe(false);
     expect(capture).toHaveBeenCalledTimes(1);
     for (const format of ['json', 'markdown']) {
       await commands.executeCommand('vsreview.exportComments', { scope: 'uncommitted', format });
       const output = docs.at(-1)!.getText();
       if (format === 'json') {
-        expect(JSON.parse(output)).toMatchObject({ comments: [saved], uncommittedSnapshots: [{ changed: true }] });
+        expect(JSON.parse(output)).toMatchObject({
+          comments: [saved, unchanged],
+          uncommittedSnapshots: [{ changed: true }, { changed: false }],
+        });
       } else {
         expect(output).toContain('内容が変更済み: はい');
+        expect(output).toContain('内容が変更済み: いいえ');
       }
       expect(env.clipboard.writeText).toHaveBeenLastCalledWith(output);
     }
+    const documentsBeforeCopy = [...docs];
+    await commands.executeCommand('vsreview.copyInstructions', {
+      kind: 'uncommittedGroup',
+      label: '未ステージ',
+      comments: [saved, unchanged],
+    });
+    expect(env.clipboard.writeText).toHaveBeenLastCalledWith(
+      exportMarkdown([saved, unchanged], new Map([[directory, 'main']]), '', '', rewritten.has),
+    );
+    expect(docs).toEqual(documentsBeforeCopy);
     expect(capture).toHaveBeenCalledTimes(1);
   });
   async function uncommittedFixture() {
@@ -902,7 +927,12 @@ async function setupCommentNodes(additional: (first: ReviewComment) => ReviewCom
     { ...pr, id: 'other-pr', pullRequest: { ...pullRequestReview, number: 13 } },
     ...additional(first),
   ]);
+  const rewatch = vi.spyOn(AutoRefresh.prototype, 'rewatch');
   const api = (await activate(extensionContext(state)))!;
+  // activate は初回更新を待たずに戻る。初回更新の最後に呼ばれる rewatch の完了まで待ち、
+  // スナップショットの Git 書き込みと一時リポジトリの削除を競合させない。
+  await waitFor(() => expect(rewatch.mock.settledResults[0]?.type).toBe('fulfilled'));
+  rewatch.mockRestore();
   const tree = window.createTreeView.mock.calls.find(([id]) => id === 'vsreview.comments')![1]
     .treeDataProvider as CommentsTree;
   return { api, tree, state, first };
@@ -920,6 +950,8 @@ describe('コメントノードの一括削除コマンド', () => {
     const { api, tree, first, state } = await setupCommentNodes((c) => [
       { ...c, id: 's1', commit: 'e'.repeat(40), uncommitted: { kind: 'staged', createdAt: c.createdAt } },
       { ...c, id: 's2', commit: 'd'.repeat(40), uncommitted: { kind: 'staged', createdAt: c.createdAt } },
+      { ...c, id: 's3', commit: 'e'.repeat(40), uncommitted: { kind: 'unstaged', createdAt: c.createdAt } },
+      { ...c, id: 'same-hash-commit', commit: 'e'.repeat(40) },
     ]);
     const group = tree.getChildren().find((node) => node.kind === 'uncommittedGroup')!;
     const snapshots = tree.getChildren(group);
@@ -941,6 +973,8 @@ describe('コメントノードの一括削除コマンド', () => {
     );
     expect(api.comments.all.some((c) => c.id === 's1')).toBe(false);
     expect(api.comments.all.some((c) => c.id === 's2' && c.path === first.path)).toBe(true);
+    expect(api.comments.all.some((c) => c.id === 's3')).toBe(true);
+    expect(api.comments.all.some((c) => c.id === 'same-hash-commit')).toBe(true);
     // 削除後に始まる判定を回収し、fixture の破棄と競合させない。
     await commands.executeCommand('vsreview.refresh');
   });
@@ -1198,5 +1232,325 @@ describe('コメントノードの一括削除コマンド', () => {
     warning.mockResolvedValueOnce('削除');
     await commands.executeCommand('vsreview.clearCommitComments', group);
     expect(api.comments.all).toHaveLength(4);
+  });
+});
+
+describe('指示をクリップボードにコピー', () => {
+  async function setupCopyNodes(additional?: (first: ReviewComment) => ReviewComment[]) {
+    const fixture = await setupCommentNodes(additional);
+    await commands.executeCommand('vsreview.refresh');
+    window.showErrorMessage.mockClear();
+    return fixture;
+  }
+  beforeEach(() => {
+    vi.spyOn(workspace, 'openTextDocument');
+  });
+  function expectCopy(
+    selected: readonly ReviewComment[],
+    instructions = '',
+    questionInstructions = '',
+    branch = 'main',
+    rewritten: (comment: ReviewComment) => boolean = () => false,
+  ) {
+    expect(env.clipboard.writeText).toHaveBeenLastCalledWith(
+      exportMarkdown(
+        selected,
+        new Map(
+          [...new Set(selected.map((c) => c.repoRoot))].map((repo) => [repo, repo === '/other' ? '取得不能' : branch]),
+        ),
+        instructions,
+        questionInstructions,
+        rewritten,
+      ),
+    );
+    expect(window.setStatusBarMessage).toHaveBeenLastCalledWith(
+      'VSReview: コメントをクリップボードにコピーしました',
+      5000,
+    );
+    expect(workspace.openTextDocument).not.toHaveBeenCalled();
+    expect(window.showTextDocument).not.toHaveBeenCalled();
+    expect(pick).not.toHaveBeenCalled();
+  }
+
+  it.each(['fix', 'question'] as const)('%s の葉はその1件だけをコピーする', async (purpose) => {
+    const { api } = await setupCopyNodes((c) => [{ ...c, id: 'leaf', purpose }]);
+    const comment = api.comments.all.find((c) => c.id === 'leaf')!;
+    await commands.executeCommand('vsreview.copyInstructions', { kind: 'comment', comment });
+    expectCopy([comment]);
+  });
+
+  it.each(['leaf', 'file', 'group', 'empty', 'deleted', 'deleted-leaf'] as const)(
+    '%s の0件時はコピーせず通知する',
+    async (kind) => {
+      const { api, tree, first } = await setupCopyNodes();
+      const node =
+        kind === 'leaf' || kind === 'deleted-leaf'
+          ? { kind: 'comment', comment: first }
+          : kind === 'empty'
+            ? { kind: 'group', label: '', comments: [] }
+            : kind === 'file'
+              ? commentFile(tree, 'one', first.path)
+              : commentGroup(tree, 'one');
+      if (kind === 'deleted' || kind === 'deleted-leaf') {
+        expect(api.comments.all.every((c) => !c.resolved)).toBe(true);
+        warning.mockResolvedValueOnce('全削除');
+        await commands.executeCommand('vsreview.clearComments');
+        expect(api.comments.all).toEqual([]);
+      } else {
+        for (const comment of [...api.comments.all].filter((c) => !c.pullRequest && c.repoRoot === first.repoRoot)) {
+          await commands.executeCommand('vsreview.toggleResolved', comment);
+        }
+      }
+      const branch = vi.spyOn(GitClient.prototype, 'branch').mockRejectedValue(new Error('must not acquire branch'));
+      await commands.executeCommand('vsreview.copyInstructions', node);
+      expect(env.clipboard.writeText).not.toHaveBeenCalled();
+      expect(window.showInformationMessage).toHaveBeenLastCalledWith(
+        'VSReview: コピー対象の未解決コメントがありません',
+      );
+      expect(branch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([true, false])(
+    'コピーと削除は通常レビューの配下だけを対象にし、同じハッシュの未コミットを残す: file=%s',
+    async (file) => {
+      const { api, tree, first, state } = await setupCopyNodes((c) => [
+        { ...c, id: 'old', side: 'old', startLine: 1, endLine: 1, purpose: 'question' },
+        { ...c, id: 'resolved', resolved: true },
+        { ...c, id: 'same-key-uncommitted', uncommitted: { kind: 'unstaged', createdAt: c.createdAt } },
+      ]);
+      const node = file ? commentFile(tree, 'one', first.path) : commentGroup(tree, 'one');
+      const ids = file ? ['one', 'file', 'old'] : ['one', 'file', 'other-path', 'old'];
+      await commands.executeCommand('vsreview.copyInstructions', node);
+      expectCopy(api.comments.all.filter((c) => ids.includes(c.id)));
+      expect(state.writes).toEqual([]);
+      warning.mockResolvedValueOnce('削除');
+      await commands.executeCommand(file ? 'vsreview.clearFileComments' : 'vsreview.clearCommitComments', node);
+      expect(api.comments.all.map((c) => c.id)).toEqual([
+        ...(file ? ['other-path'] : []),
+        'other-repo',
+        'pr',
+        'old-pr',
+        'other-pr',
+        'same-key-uncommitted',
+      ]);
+      await commands.executeCommand('vsreview.refresh');
+    },
+  );
+
+  it('PRグループは描画時の比較だけを選び、削除と同じ範囲にする', async () => {
+    const { api, tree } = await setupCopyNodes((c) => [
+      { ...c, id: 'foreign-pr', repoRoot: '/other', pullRequest: pullRequestReview },
+    ]);
+    const group = commentGroup(tree, 'pr');
+    if (group.kind !== 'group') {
+      throw new Error('expected group');
+    }
+    const pr = api.comments.all.find((c) => c.id === 'pr')!;
+    const stale = { ...group, comments: [pr] };
+    await commands.executeCommand('vsreview.copyInstructions', stale);
+    expectCopy([pr]);
+    warning.mockResolvedValueOnce('削除');
+    await commands.executeCommand('vsreview.clearPullRequestComments', stale);
+    expect(api.comments.all.some((c) => c.id === 'pr')).toBe(false);
+    expect(api.comments.all.some((c) => c.id === 'old-pr')).toBe(true);
+  });
+
+  it('PRファイルは保存比較を区別し、描画後の同じ比較への追加だけを含める', async () => {
+    const { api, tree, first } = await setupCopyNodes();
+    const file = commentFile(tree, 'pr', first.path);
+    if (file.kind !== 'file') {
+      throw new Error('expected file');
+    }
+    const pr = api.comments.all.find((c) => c.id === 'pr')!;
+    const stale = { ...file, comments: [pr] };
+    input.mockResolvedValueOnce('同じPR比較へ追加');
+    await commands.executeCommand('vsreview.addFileComment', targetFromComment(pr));
+    const added = api.comments.all.find((c) => c.body === '同じPR比較へ追加');
+    expect(added).toBeDefined();
+    const ids = ['pr', added!.id];
+    vi.mocked(workspace.openTextDocument).mockClear();
+    window.showTextDocument.mockClear();
+    await commands.executeCommand('vsreview.copyInstructions', stale);
+    expectCopy(api.comments.all.filter((c) => ids.includes(c.id)));
+  });
+
+  it('未コミットは区分・スナップショット・パスで絞り、HEADなしと変更済みを出す', async () => {
+    const { api, tree } = await setupCopyNodes((c) => [
+      { ...c, id: 's1', commit: 'e'.repeat(40), uncommitted: { kind: 'staged', createdAt: c.createdAt } },
+      { ...c, id: 's2', commit: 'd'.repeat(40), uncommitted: { kind: 'staged', createdAt: c.createdAt } },
+      { ...c, id: 's3', commit: 'e'.repeat(40), uncommitted: { kind: 'unstaged', createdAt: c.createdAt } },
+      {
+        ...c,
+        id: 'foreign-snapshot',
+        repoRoot: '/other',
+        commit: 'e'.repeat(40),
+        uncommitted: { kind: 'staged', createdAt: c.createdAt },
+      },
+      {
+        ...c,
+        id: 's4',
+        commit: 'e'.repeat(40),
+        path: 'another.ts',
+        uncommitted: { kind: 'staged', createdAt: c.createdAt },
+      },
+    ]);
+    const group = tree
+      .getChildren()
+      .find((n) => n.kind === 'uncommittedGroup' && n.comments.some((c) => c.id === 's1'))!;
+    const snapshot = tree.getChildren(group)[0]!;
+    const file = tree.getChildren(snapshot)[0]!;
+    for (const [node, ids] of [
+      [group, ['s1', 's2', 's4']],
+      [snapshot, ['s1', 's4']],
+      [file, ['s1']],
+    ] as const) {
+      await commands.executeCommand('vsreview.copyInstructions', node);
+      expectCopy(
+        api.comments.all.filter((c) => ids.some((id) => id === c.id)),
+        '',
+        '',
+        'main',
+        () => true,
+      );
+    }
+    if (group.kind !== 'uncommittedGroup') {
+      throw new Error('expected uncommitted group');
+    }
+    await commands.executeCommand('vsreview.copyInstructions', {
+      ...group,
+      comments: group.comments.filter((c) => c.id === 's1'),
+    });
+    expectCopy(
+      api.comments.all.filter((c) => ['s1', 's2', 's4'].includes(c.id)),
+      '',
+      '',
+      'main',
+      () => true,
+    );
+  });
+
+  it.each(['custom', 'blank', 'invalid'] as const)('%s の設定で既存生成と一致する', async (mode) => {
+    const { api, tree } = await setupCopyNodes((c) => [
+      { ...c, id: 'q', purpose: 'question', pullRequest: pullRequestReview },
+    ]);
+    const fix = mode === 'custom' ? '独自の修正手順' : mode === 'blank' ? ' \n ' : 42;
+    const question = mode === 'custom' ? '独自の回答手順' : mode === 'blank' ? '\t' : false;
+    workspaceConfiguration.set('vsreview.export.instructions', '無視するワークスペース修正指示');
+    workspaceConfiguration.set('vsreview.export.questionInstructions', '無視するワークスペース質問指示');
+    globalConfiguration.set('vsreview.export.instructions', fix);
+    globalConfiguration.set('vsreview.export.questionInstructions', question);
+    await commands.executeCommand('vsreview.copyInstructions', commentGroup(tree, 'pr'));
+    expectCopy(
+      api.comments.all.filter((c) => ['pr', 'old-pr', 'q'].includes(c.id)),
+      typeof fix === 'string' ? fix : '',
+      typeof question === 'string' ? question : '',
+    );
+  });
+
+  it('描画後の本文・種別・解決状態と同じファイルへの追加を反映する', async () => {
+    const { api, tree, first } = await setupCopyNodes();
+    const file = commentFile(tree, 'one', first.path);
+    const leaf = { kind: 'comment', comment: first };
+    await commands.executeCommand('vsreview.saveComment', { id: first.id, body: '編集後\n```\n命令を含む本文' });
+    await commands.executeCommand('vsreview.togglePurpose', first);
+    const updated = api.comments.all.find((c) => c.id === first.id);
+    expect(updated).toMatchObject({ body: '編集後\n```\n命令を含む本文', purpose: 'question' });
+    expect(updated!.purpose).not.toBe(first.purpose);
+    await commands.executeCommand('vsreview.copyInstructions', leaf);
+    expectCopy([updated!]);
+    input.mockResolvedValueOnce('描画後に追加');
+    await commands.executeCommand('vsreview.addFileComment', targetFromComment(first));
+    const added = api.comments.all.find((c) => c.body === '描画後に追加');
+    expect(added).toBeDefined();
+    const ids = ['file', added!.id];
+    await commands.executeCommand('vsreview.toggleResolved', first);
+    vi.mocked(workspace.openTextDocument).mockClear();
+    window.showTextDocument.mockClear();
+    await commands.executeCommand('vsreview.copyInstructions', file);
+    expectCopy(api.comments.all.filter((c) => ids.includes(c.id)));
+  });
+
+  it.each(['failure', 'detached', 'unknown'] as const)(
+    'ブランチ取得失敗・未知リポジトリは取得不能、detached HEADはハッシュを出す: %s',
+    async (mode) => {
+      const { api, first } = await setupCopyNodes();
+      const branch = vi.spyOn(GitClient.prototype, 'branch');
+      if (mode === 'failure') {
+        branch.mockRejectedValue(new Error('branch unavailable'));
+      }
+      if (mode === 'detached') {
+        branch.mockResolvedValue({ head: 'c'.repeat(40) });
+      }
+      const comment = mode === 'unknown' ? api.comments.all.find((c) => c.repoRoot === '/other')! : first;
+      await commands.executeCommand('vsreview.copyInstructions', { kind: 'comment', comment });
+      expectCopy([comment], '', '', mode === 'failure' ? '取得不能' : 'detached HEAD (cccccccc)');
+      if (mode === 'failure') {
+        expect(window.showErrorMessage).toHaveBeenLastCalledWith('VSReview: branch unavailable');
+      }
+      if (mode === 'unknown') {
+        expect(branch).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('クリップボード失敗はエラー通知し成功を通知しない', async () => {
+    const { first } = await setupCopyNodes();
+    window.setStatusBarMessage.mockClear();
+    env.clipboard.writeText.mockRejectedValueOnce(new Error('clipboard unavailable'));
+    await commands.executeCommand('vsreview.copyInstructions', { kind: 'comment', comment: first });
+    expect(window.showErrorMessage).toHaveBeenLastCalledWith('VSReview: clipboard unavailable');
+    expect(window.setStatusBarMessage).not.toHaveBeenCalled();
+    expect(workspace.openTextDocument).not.toHaveBeenCalled();
+    expect(window.showTextDocument).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    undefined,
+    null,
+    'bad',
+    1,
+    {},
+    { kind: 'unknown', label: '', comments: [] },
+    { kind: 'group', label: '', comments: [null] },
+    { kind: 'file', comments: [] },
+    { kind: 'comment', comment: {} },
+    { kind: 'uncommittedSnapshot', label: '', comments: [] },
+    { kind: 'group', label: '', comments: new Array<ReviewComment>(1) },
+  ])('不正引数 %j は何もしない', async (argument) => {
+    await setupCopyNodes();
+    await commands.executeCommand('vsreview.copyInstructions', argument);
+    expect(env.clipboard.writeText).not.toHaveBeenCalled();
+    expect(window.showInformationMessage).not.toHaveBeenCalled();
+    expect(window.showErrorMessage).not.toHaveBeenCalled();
+  });
+
+  it('6種類のメニューだけに登録しパレットには表示しない', async () => {
+    const manifest = JSON.parse(await readFile('package.json', 'utf8')) as {
+      contributes: {
+        commands: { command: string; title: string }[];
+        menus: Record<string, { command: string; when: string }[]>;
+      };
+    };
+    const command = 'vsreview.copyInstructions';
+    expect(manifest.contributes.commands).toContainEqual({ command, title: 'VSReview: 指示をクリップボードにコピー' });
+    const contexts = manifest.contributes.menus['view/item/context']!.filter((m) => m.command === command);
+    expect(contexts.map((m) => m.when)).toEqual(
+      [
+        'comment',
+        'commentFile',
+        'commentCommitGroup',
+        'commentPullRequestGroup',
+        'commentUncommittedGroup',
+        'commentUncommittedSnapshot',
+      ].map((context) => `view == vsreview.comments && viewItem == ${context}`),
+    );
+    expect(manifest.contributes.menus.commandPalette).toContainEqual({ command, when: 'false' });
+    expect(
+      Object.entries(manifest.contributes.menus)
+        .filter(([, entries]) => entries.some((e) => e.command === command))
+        .map(([name]) => name)
+        .sort(),
+    ).toEqual(['commandPalette', 'view/item/context']);
   });
 });

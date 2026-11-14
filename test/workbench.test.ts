@@ -2,7 +2,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { clickWorkbenchElement } from '../e2e/workbench';
-import { E2E_TIMEOUT_MS } from '../e2e/timeouts';
+import { E2E_TIMEOUT_MS, CONTEXT_MENU_SETTLE_MS } from '../e2e/timeouts';
 import { temporaryDirectory } from './fixtures';
 
 describe('workbench', () => {
@@ -28,6 +28,7 @@ describe('workbench', () => {
     ['壊れた応答', '拒否'],
     ['CDP エラー', '拒否'],
     ['クリック', 'クリック'],
+    ['右クリック', 'クリック'],
     ['異なるID', 'クリック'],
     ['座標なし', '拒否'],
   ])('CDP は %s で %s して接続を閉じる', async (scenario, expected) => {
@@ -62,7 +63,7 @@ describe('workbench', () => {
           this.onmessage?.({ data: '{' } as MessageEvent<string>);
         } else if (scenario === 'CDP エラー') {
           this.onmessage?.({ data: JSON.stringify({ id, error: 'rejected' }) } as MessageEvent<string>);
-        } else if (['クリック', '異なるID', '座標なし'].includes(scenario)) {
+        } else if (['クリック', '右クリック', '異なるID', '座標なし'].includes(scenario)) {
           if (scenario === '異なるID') {
             this.onmessage?.({ data: JSON.stringify({ id: id + 1, error: 'ignore' }) } as MessageEvent<string>);
           }
@@ -78,7 +79,8 @@ describe('workbench', () => {
     vi.stubGlobal('WebSocket', FakeSocket);
     vi.useFakeTimers();
     const expression = `(${JSON.stringify(coordinates)})`;
-    const pending = clickWorkbenchElement(expression);
+    const button = scenario === '右クリック' ? 'right' : 'left';
+    const pending = clickWorkbenchElement(expression, button);
     const failures: Record<string, string | typeof SyntaxError> = {
       接続タイムアウト: 'CDP の応答が期限内に届きませんでした',
       接続切断: 'CDP の接続が閉じられました',
@@ -106,6 +108,21 @@ describe('workbench', () => {
     } else if (scenario.endsWith('エラー') && scenario !== 'CDP エラー') {
       socket.onerror?.();
     }
+    if (scenario === '右クリック') {
+      let settled = false;
+      // 失敗の判定は後続の await result に任せ、ここでは未処理 rejection にしない。
+      void pending.then(
+        () => {
+          settled = true;
+        },
+        () => undefined,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      expect(socket.close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(CONTEXT_MENU_SETTLE_MS);
+      expect(settled).toBe(true);
+    }
     await result;
     expect(socket.close).toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
@@ -119,7 +136,7 @@ describe('workbench', () => {
         'Input.dispatchMouseEvent',
       ]);
       expect(requests[0]?.params).toMatchObject({ expression });
-      const mouse = { ...coordinates, button: 'left', clickCount: 1 };
+      const mouse = { ...coordinates, button, clickCount: 1 };
       expect(requests.slice(1).map(({ params }) => params)).toEqual([
         { ...mouse, type: 'mousePressed' },
         { ...mouse, type: 'mouseReleased' },

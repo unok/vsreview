@@ -146,6 +146,10 @@
         "title": "VSReview: コメントの差分を開く"
       },
       {
+        "command": "vsreview.copyInstructions",
+        "title": "VSReview: 指示をクリップボードにコピー"
+      },
+      {
         "command": "vsreview.exportComments",
         "title": "VSReview: AI Agent 向けにコメントをエクスポート",
         "icon": "$(export)"
@@ -246,6 +250,30 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "vsreview.copyInstructions",
+          "when": "view == vsreview.comments && viewItem == comment"
+        },
+        {
+          "command": "vsreview.copyInstructions",
+          "when": "view == vsreview.comments && viewItem == commentFile"
+        },
+        {
+          "command": "vsreview.copyInstructions",
+          "when": "view == vsreview.comments && viewItem == commentCommitGroup"
+        },
+        {
+          "command": "vsreview.copyInstructions",
+          "when": "view == vsreview.comments && viewItem == commentPullRequestGroup"
+        },
+        {
+          "command": "vsreview.copyInstructions",
+          "when": "view == vsreview.comments && viewItem == commentUncommittedGroup"
+        },
+        {
+          "command": "vsreview.copyInstructions",
+          "when": "view == vsreview.comments && viewItem == commentUncommittedSnapshot"
+        },
         {
           "command": "vsreview.copyHash",
           "when": "view == vsreview.commits && viewItem == commit"
@@ -367,6 +395,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "vsreview.copyInstructions",
+          "when": "false"
+        },
         {
           "command": "vsreview.loadMore",
           "when": "false"

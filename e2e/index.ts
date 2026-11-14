@@ -1,3 +1,4 @@
+import { exportMarkdown } from '../src/core/export';
 import { runGit } from '../src/git/client';
 import { poll, waitForActiveEditor } from './timeouts';
 import { clickCommentInput, createCommentInput } from './commentInput';
@@ -349,6 +350,49 @@ export async function run(): Promise<void> {
   );
   await vscode.commands.executeCommand('vsreview.toggleResolved', resolved);
   assert.equal(api.comments.all.find((comment) => comment.id === resolved.id)?.resolved, true);
+  await vscode.commands.executeCommand('vsreview.comments.focus');
+  const copyGroup = api.commentsTree
+    .getChildren()
+    .find((node) => node.kind === 'group' && node.comments.some((c) => c.id === resolved.id));
+  assert.ok(copyGroup && copyGroup.kind === 'group');
+  const documentsBeforeCopy = vscode.workspace.textDocuments.map((doc) => doc.uri.toString()).sort();
+  const tabsBeforeCopy = vscode.window.tabGroups.all.flatMap((group) => group.tabs);
+  await vscode.env.clipboard.writeText('before context copy');
+  await clickWorkbenchElement(
+    visibleElementExpression(
+      `(() => {
+        const pane = [...document.querySelectorAll('.pane')].find(pane =>
+          pane.querySelector('.pane-header')?.textContent.includes('Review Comments'));
+        return [...(pane?.querySelectorAll('.monaco-list-row') ?? [])].find(row =>
+          row.textContent.includes(${JSON.stringify(copyGroup.label)}));
+      })()`,
+      'コピー対象のコメントグループが表示されませんでした',
+    ),
+    'right',
+  );
+  await clickWorkbenchElement(
+    visibleElementExpression(
+      `[...document.querySelectorAll('.context-view .action-label')].find(element => element.textContent.includes('指示をクリップボードにコピー'))`,
+      '「指示をクリップボードにコピー」のメニューが表示されませんでした',
+    ),
+  );
+  const copySelected = copyGroup.comments.filter((c) => !c.resolved);
+  assert.equal(copySelected.length, 1);
+  const currentBranch = (await runGit(copySelected[0]!.repoRoot, ['symbolic-ref', '--short', 'HEAD']))
+    .toString('utf8')
+    .trim();
+  const expectedCopy = exportMarkdown(copySelected, new Map([[copySelected[0]!.repoRoot, currentBranch]]));
+  await poll(
+    async () => ((await vscode.env.clipboard.readText()) !== 'before context copy' ? true : undefined),
+    '右クリックからの指示がクリップボードにコピーされませんでした',
+  );
+  assert.equal(await vscode.env.clipboard.readText(), expectedCopy);
+  assert.ok(!expectedCopy.includes(resolvedBody));
+  assert.deepEqual(vscode.workspace.textDocuments.map((doc) => doc.uri.toString()).sort(), documentsBeforeCopy);
+  assert.deepEqual(
+    vscode.window.tabGroups.all.flatMap((group) => group.tabs),
+    tabsBeforeCopy,
+  );
   await vscode.env.clipboard.writeText('before interactive export');
   await vscode.commands.executeCommand('vsreview.comments.focus');
   try {

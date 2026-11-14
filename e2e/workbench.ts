@@ -1,10 +1,13 @@
 import * as assert from 'node:assert/strict';
-import { E2E_TIMEOUT_MS, E2E_POLL_MS } from './timeouts';
+import { E2E_TIMEOUT_MS, E2E_POLL_MS, CONTEXT_MENU_SETTLE_MS } from './timeouts';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /** ページ内で { x, y }（またはその Promise）を返す式を評価し、その座標をクリックする。 */
-export async function clickWorkbenchElement(locateExpression: string): Promise<void> {
+export async function clickWorkbenchElement(
+  locateExpression: string,
+  button: 'left' | 'right' = 'left',
+): Promise<void> {
   const userData = process.env.VSREVIEW_E2E_USER_DATA;
   assert.ok(userData, 'E2E の user-data-dir が未指定です');
   const port = (await readFile(join(userData, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
@@ -73,13 +76,16 @@ export async function clickWorkbenchElement(locateExpression: string): Promise<v
       });
       throw new Error(JSON.stringify({ evaluated, widget }));
     }
-    await request('Input.dispatchMouseEvent', { type: 'mousePressed', ...result.value, button: 'left', clickCount: 1 });
+    await request('Input.dispatchMouseEvent', { type: 'mousePressed', ...result.value, button, clickCount: 1 });
     await request('Input.dispatchMouseEvent', {
       type: 'mouseReleased',
       ...result.value,
-      button: 'left',
+      button,
       clickCount: 1,
     });
+    if (button === 'right') {
+      await new Promise((resolve) => setTimeout(resolve, CONTEXT_MENU_SETTLE_MS));
+    }
   } finally {
     socket.close();
   }

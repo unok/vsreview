@@ -1,3 +1,5 @@
+import type { ReviewComment } from './model';
+
 export function comparisonKey(
   target:
     | {
@@ -29,6 +31,13 @@ export function reviewGroupKey(
   comment: { repoRoot: string; commit: string } & { pullRequest?: { number: number } },
 ): string {
   return comment.pullRequest ? pullRequestKey(comment.repoRoot, comment.pullRequest.number) : commitKey(comment);
+}
+
+export function commentGroupKey(comment: ReviewComment): string {
+  // エクスポートの reviewGroupKey は変えず、Review Comments の表示区分を識別する。
+  return comment.uncommitted
+    ? JSON.stringify([comment.repoRoot, 'uncommitted', comment.uncommitted.kind])
+    : reviewGroupKey(comment);
 }
 
 export function pullRequestKey(repo: string, number: number): string {

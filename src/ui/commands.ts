@@ -5,7 +5,7 @@ import type { PullRequestsTree } from './pullRequests';
 import type { FilesTree } from './files';
 import * as vscode from 'vscode';
 import { updateFileView } from './fileView';
-import { isRecord } from '../core/validation';
+import { isRecord, isRevision } from '../core/validation';
 import { isCommit } from '../core/gitParsing';
 import { targetFromComment } from '../core/documents';
 import type { ReviewComments } from './comments';
@@ -13,12 +13,12 @@ import type { ReviewDocuments } from './documents';
 import type { ReviewDiff } from './diff';
 import type { RepositoryAccess } from './repositories';
 import { commentContextValue, type CommentNode, type CommitsTree } from './trees';
-import { comparisonKey, commitKey } from '../core/comparisons';
-import { isReviewComment, isCommentPurpose, type ReviewComment } from '../core/model';
+import { comparisonKey, commitKey, commentGroupKey } from '../core/comparisons';
+import { isReviewComment, isCommentPurpose, selectComments, type ReviewComment } from '../core/model';
 import type { RewrittenComments } from './rewritten';
 import { basename } from 'node:path';
 import { registerCommand, showError, showInfo, showStatus } from './common';
-import { isExportRequest, exportComments } from './export';
+import { isExportRequest, exportComments, copyInstructions } from './export';
 import { workingPosition } from './navigation';
 export async function selectRepository(
   access: RepositoryAccess,
@@ -171,18 +171,19 @@ export function registerReviewCommands(
       if (!isCommentGroupOrFileNode(arg) || commentContextValue(arg) !== contextValue) {
         return;
       }
-      // 描画後に同じ比較へ追加されたコメントも含めるため、ノードの ID 一覧ではなく比較とパスで照合する。
-      const keys = new Set(arg.comments.map(reviewComparisonKey));
-      const path = arg.kind === 'file' ? arg.label : undefined;
-      return comments.clearMatching(
-        (comment) => keys.has(reviewComparisonKey(comment)) && (path === undefined || comment.path === path),
-        scope,
-      );
+      return comments.clearMatching(commentNodeFilter(arg), scope);
     });
   }
   command('clearRewrittenComments', async () => {
     await rewritten.refresh();
     await comments.clearRewritten(rewritten.has);
+  });
+  command('copyInstructions', (arg) => {
+    if (!isCopyInstructionsNode(arg)) {
+      return;
+    }
+    const selected = selectComments(commentsForNode(arg, comments.all), { unresolvedOnly: true });
+    return copyInstructions(selected, access, rewritten.has);
   });
   command('exportComments', (arg) => {
     // view/title は { $treeViewId } を渡すため、出力指定のないオブジェクトも対話に進める。
@@ -227,5 +228,53 @@ function isCommentGroupOrFileNode(value: unknown): value is Exclude<CommentNode,
 function reviewComparisonKey(comment: ReviewComment): string {
   // PR は複数の比較を含むので reviewGroupKey では広すぎる。comparisonKey で同じコミットの通常レビューとも区別する。
   // 通常レビューは親の有無にかかわらず、既存のグループ分けと同じコミット単位で扱う。
-  return comment.pullRequest ? comparisonKey(comment) : commitKey(comment);
+  // 同じハッシュを持つ未コミットのスナップショットと通常レビューを分けるため、表示区分も含める。
+  return JSON.stringify([commentGroupKey(comment), comment.pullRequest ? comparisonKey(comment) : commitKey(comment)]);
+}
+
+function isCopyInstructionsNode(value: unknown): value is CommentNode {
+  if (!isRecord(value) || Array.isArray(value)) {
+    return false;
+  }
+  if (value.kind === 'comment') {
+    return isReviewComment(value.comment);
+  }
+  return (
+    (value.kind === 'group' ||
+      value.kind === 'file' ||
+      value.kind === 'uncommittedGroup' ||
+      (value.kind === 'uncommittedSnapshot' && isRevision(value.hash))) &&
+    typeof value.label === 'string' &&
+    Array.isArray(value.comments) &&
+    // Array.from は疎配列の穴も検証する。
+    Array.from(value.comments).every(isReviewComment)
+  );
+}
+
+function commentsForNode(node: CommentNode, comments: readonly ReviewComment[]): readonly ReviewComment[] {
+  if (node.kind === 'comment') {
+    return comments.filter((comment) => comment.id === node.comment.id);
+  }
+  if (node.kind === 'group' || node.kind === 'file') {
+    return comments.filter(commentNodeFilter(node));
+  }
+  const first = node.comments[0];
+  if (!first) {
+    return [];
+  }
+  return comments.filter(
+    (comment) =>
+      comment.repoRoot === first.repoRoot &&
+      comment.uncommitted !== undefined &&
+      comment.uncommitted.kind === first.uncommitted?.kind &&
+      (node.kind !== 'uncommittedSnapshot' || comment.commit === node.hash),
+  );
+}
+
+function commentNodeFilter(node: Exclude<CommentNode, { kind: 'comment' }>): (comment: ReviewComment) => boolean {
+  // ノードの comments は描画時の値なので、表示区分・比較・パスを保存済みコメントへ照合し直し、
+  // 同じ比較への描画後の追加・編集・解決状態の変更を反映する。
+  const keys = new Set(node.comments.map(reviewComparisonKey));
+  const path = node.kind === 'file' ? node.label : undefined;
+  return (comment) => keys.has(reviewComparisonKey(comment)) && (path === undefined || comment.path === path);
 }
