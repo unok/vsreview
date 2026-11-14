@@ -1,0 +1,509 @@
+{
+  "name": "vsreview",
+  "displayName": "VSReview",
+  "description": "コミット差分のレビューコメントを AI Agent に渡す VS Code 拡張",
+  "version": "0.1.0",
+  "publisher": "vsreview",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:vsreview.commits",
+    "onView:vsreview.pullRequests",
+    "onView:vsreview.comments",
+    "onView:vsreview.files",
+    "onFileSystem:vsreview"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "build": "node esbuild.mjs",
+    "check": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test && pnpm build",
+    "vscode:prepublish": "pnpm build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:e2e": "pnpm build && node scripts/e2e.mjs"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vsreview",
+          "title": "VSReview",
+          "icon": "assets/review.svg"
+        }
+      ]
+    },
+    "views": {
+      "vsreview": [
+        {
+          "id": "vsreview.commits",
+          "name": "Commits"
+        },
+        {
+          "id": "vsreview.pullRequests",
+          "name": "Pull Requests"
+        },
+        {
+          "id": "vsreview.comments",
+          "name": "Review Comments"
+        },
+        {
+          "id": "vsreview.files",
+          "name": "Files",
+          "visibility": "collapsed"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vsreview.refresh",
+        "title": "VSReview: 更新",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vsreview.selectRepository",
+        "title": "VSReview: リポジトリを選択",
+        "icon": "$(repo)"
+      },
+      {
+        "command": "vsreview.loadMore",
+        "title": "VSReview: さらに読み込む"
+      },
+      {
+        "command": "vsreview.copyHash",
+        "title": "VSReview: ハッシュをコピー"
+      },
+      {
+        "command": "vsreview.openDiff",
+        "title": "VSReview: 差分を開く"
+      },
+      {
+        "command": "vsreview.nextFile",
+        "title": "VSReview: 同コミットの次のファイル",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "vsreview.previousFile",
+        "title": "VSReview: 同コミットの前のファイル",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "vsreview.openWorkingFile",
+        "title": "VSReview: 作業ツリーの対応行で開く",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "vsreview.addFileComment",
+        "title": "VSReview: ファイルにコメントを追加",
+        "icon": "$(comment-add)"
+      },
+      {
+        "command": "vsreview.addRangeComment",
+        "title": "コメントを追加"
+      },
+      {
+        "command": "vsreview.editComment",
+        "title": "コメントを編集",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "vsreview.saveComment",
+        "title": "変更を保存"
+      },
+      {
+        "command": "vsreview.cancelEdit",
+        "title": "編集を取り消す"
+      },
+      {
+        "command": "vsreview.deleteComment",
+        "title": "VSReview: コメントを削除",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "vsreview.toggleResolved",
+        "title": "VSReview: 解決状態を切り替え",
+        "icon": "$(check)"
+      },
+      {
+        "command": "vsreview.clearComments",
+        "title": "VSReview: コメントを全削除",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "vsreview.openComment",
+        "title": "VSReview: コメントの差分を開く"
+      },
+      {
+        "command": "vsreview.exportComments",
+        "title": "VSReview: AI Agent 向けにコメントをエクスポート",
+        "icon": "$(export)"
+      },
+      {
+        "command": "vsreview.clearRewrittenComments",
+        "title": "VSReview: 書き換え済みコミットのコメントを削除"
+      },
+      {
+        "command": "vsreview.showFileList",
+        "title": "VSReview: 一覧で表示",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "vsreview.showFileTree",
+        "title": "VSReview: ツリーで表示",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "vsreview.openRevisionFile",
+        "title": "VSReview: ファイルを開く"
+      },
+      {
+        "command": "vsreview.refreshPullRequests",
+        "title": "VSReview: Pull Requests を更新",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vsreview.openPullRequestNumber",
+        "title": "VSReview: PR 番号を入力して開く",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "vsreview.openPullRequest",
+        "title": "VSReview: PR の差分を開く"
+      },
+      {
+        "command": "vsreview.clearCommitComments",
+        "title": "VSReview: このコミットのコメントを削除"
+      },
+      {
+        "command": "vsreview.clearPullRequestComments",
+        "title": "VSReview: この PR のコメントを削除"
+      },
+      {
+        "command": "vsreview.clearFileComments",
+        "title": "VSReview: このファイルのコメントを削除"
+      },
+      {
+        "command": "vsreview.clearRevisionArchives",
+        "title": "VSReview: 展開したリビジョンをすべて削除"
+      },
+      {
+        "command": "vsreview.resetRevisionArchivePermissions",
+        "title": "VSReview: リビジョン展開の許可・拒否をリセット"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "vsreview.refresh",
+          "when": "view == vsreview.commits",
+          "group": "navigation"
+        },
+        {
+          "command": "vsreview.selectRepository",
+          "when": "view == vsreview.commits",
+          "group": "navigation"
+        },
+        {
+          "command": "vsreview.exportComments",
+          "when": "view == vsreview.comments",
+          "group": "navigation"
+        },
+        {
+          "command": "vsreview.clearComments",
+          "when": "view == vsreview.comments"
+        },
+        {
+          "command": "vsreview.showFileList",
+          "when": "(view == vsreview.commits || view == vsreview.pullRequests) && vsreview.fileView == tree",
+          "group": "navigation"
+        },
+        {
+          "command": "vsreview.showFileTree",
+          "when": "(view == vsreview.commits || view == vsreview.pullRequests) && vsreview.fileView == list",
+          "group": "navigation"
+        },
+        {
+          "command": "vsreview.refreshPullRequests",
+          "when": "view == vsreview.pullRequests",
+          "group": "navigation"
+        },
+        {
+          "command": "vsreview.openPullRequestNumber",
+          "when": "view == vsreview.pullRequests",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vsreview.copyHash",
+          "when": "view == vsreview.commits && viewItem == commit"
+        },
+        {
+          "command": "vsreview.addFileComment",
+          "when": "view == vsreview.commits && viewItem == file"
+        },
+        {
+          "command": "vsreview.editComment",
+          "when": "view == vsreview.comments && viewItem == comment"
+        },
+        {
+          "command": "vsreview.deleteComment",
+          "when": "view == vsreview.comments && viewItem == comment"
+        },
+        {
+          "command": "vsreview.toggleResolved",
+          "when": "view == vsreview.comments && viewItem == comment"
+        },
+        {
+          "command": "vsreview.openPullRequest",
+          "when": "view == vsreview.pullRequests && viewItem == pullRequest"
+        },
+        {
+          "command": "vsreview.addFileComment",
+          "when": "view == vsreview.pullRequests && viewItem == file"
+        },
+        {
+          "command": "vsreview.clearCommitComments",
+          "when": "view == vsreview.comments && viewItem == commentCommitGroup"
+        },
+        {
+          "command": "vsreview.clearPullRequestComments",
+          "when": "view == vsreview.comments && viewItem == commentPullRequestGroup"
+        },
+        {
+          "command": "vsreview.clearFileComments",
+          "when": "view == vsreview.comments && viewItem == commentFile"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "vsreview.previousFile",
+          "when": "resourceScheme == vsreview || vsreview.isReviewDocument",
+          "group": "navigation"
+        },
+        {
+          "command": "vsreview.nextFile",
+          "when": "resourceScheme == vsreview || vsreview.isReviewDocument",
+          "group": "navigation"
+        },
+        {
+          "command": "vsreview.addFileComment",
+          "when": "resourceScheme == vsreview || vsreview.isReviewDocument",
+          "group": "navigation"
+        },
+        {
+          "command": "vsreview.openWorkingFile",
+          "when": "resourceScheme == vsreview || vsreview.isReviewDocument"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "vsreview.openWorkingFile",
+          "when": "resourceScheme == vsreview || vsreview.isReviewDocument"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "vsreview.addRangeComment",
+          "group": "inline",
+          "when": "commentController == vsreview"
+        }
+      ],
+      "comments/comment/title": [
+        {
+          "command": "vsreview.editComment",
+          "when": "commentController == vsreview && comment == vsreview.comment",
+          "group": "inline"
+        },
+        {
+          "command": "vsreview.deleteComment",
+          "when": "commentController == vsreview && comment == vsreview.comment",
+          "group": "inline"
+        }
+      ],
+      "comments/comment/context": [
+        {
+          "command": "vsreview.saveComment",
+          "when": "commentController == vsreview && comment == vsreview.comment",
+          "group": "inline@1"
+        },
+        {
+          "command": "vsreview.cancelEdit",
+          "when": "commentController == vsreview && comment == vsreview.comment",
+          "group": "inline@2"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "vsreview.toggleResolved",
+          "group": "navigation",
+          "when": "commentController == vsreview && commentThread == vsreview.savedThread"
+        },
+        {
+          "command": "vsreview.deleteComment",
+          "group": "navigation",
+          "when": "commentController == vsreview && commentThread == vsreview.savedThread"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vsreview.loadMore",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.copyHash",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.addRangeComment",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.editComment",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.saveComment",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.cancelEdit",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.deleteComment",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.toggleResolved",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.openComment",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.openRevisionFile",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.showFileList",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.showFileTree",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.openPullRequest",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.clearCommitComments",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.clearPullRequestComments",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.clearFileComments",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "VSReview",
+      "properties": {
+        "vsreview.export.instructions": {
+          "type": "string",
+          "default": "",
+          "description": "AI Agent 向けの指示文。空文字列ならコミットを書き換える既定の指示を使います。",
+          "scope": "application"
+        },
+        "vsreview.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Git のコミット作成・書き換え・ブランチ変更に追従して一覧を自動更新します。"
+        },
+        "vsreview.fileView": {
+          "scope": "resource",
+          "type": "string",
+          "enum": [
+            "tree",
+            "list"
+          ],
+          "default": "tree",
+          "description": "Commits と Pull Requests の変更ファイルの表示形式。tree はフォルダ階層、list は一覧で表示します。"
+        },
+        "vsreview.pullRequests.limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 50,
+          "description": "取得する未完了 PR の最大件数。"
+        },
+        "vsreview.pullRequests.remote": {
+          "type": "string",
+          "default": "origin",
+          "description": "PR の取得先リモート。origin の場合は PR の URL と一致するリモートを優先します。",
+          "scope": "machine"
+        },
+        "vsreview.export.questionInstructions": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "質問としてエクスポートするときの指示文。空白だけならコードを変更せず回答を求める既定文を使います。"
+        },
+        "vsreview.revisionArchive.linkPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules"
+          ],
+          "scope": "machine",
+          "description": "展開先から元のリポジトリへリンクする相対パス、または直下を含む同名ディレクトリのパターン（**/node_modules など）。ワークスペース設定は使いません。"
+        },
+        "vsreview.revisionArchive.maxCount": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 2,
+          "maximum": 50,
+          "scope": "machine",
+          "description": "リポジトリごとに保存する展開済みリビジョン数。開いているファイルや差分の分は保持します。"
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^24.0.0",
+    "@types/vscode": "1.90.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^3.0.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  }
+}

@@ -1,0 +1,29 @@
+# vsreview で takt を回すためのプロジェクト設定（provider/model は ~/.takt/runtime.yaml が所有。ここには書かない）
+
+# PR は TAKT の外で作る。
+auto_pr: false
+
+# 個人設定の workflow（unok-claudemd、unok-copilot-prepare）が使う品質ゲート、clone での依存準備（pnpm install --frozen-lockfile）、Copilot 対応のコマンドを許可する。
+workflow_command_gates:
+  custom_scripts: true
+workflow_runtime_prepare:
+  custom_scripts: true
+workflow_system_commands:
+  custom_scripts: true
+
+# 品質ゲート。編集する step すべてに効き、失敗すると同じ step に差し戻す。
+workflow_overrides:
+  quality_gates_edit_only: true
+  quality_gates:
+    - type: command
+      name: quality
+      command: pnpm check
+      timeout_ms: 1200000
+
+# manager（ゴールを渡すと問題点を見つけながら自走する）。
+manager:
+  workflows:
+    - unok-claudemd: 普通の機能追加や不具合の修正。実装前の報告、実装、diff レビュー、総合と専門役割のレビュー、選別と修正の往復まで行う
+    - simple: 1〜2 ファイルで済む小さな修正。軽い流れで進める
+  main_merge: approve
+  patrol_interval: 3600
