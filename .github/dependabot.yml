@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      dev-dependencies-minor-patch:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # engines.vscode (^1.90.0) と同じ版に固定する。上げると古い VS Code で動かない API を型検査が通してしまう
+      - dependency-name: '@types/vscode'
+      # 開発環境の Node.js 24 に合わせる
+      - dependency-name: '@types/node'
+        update-types:
+          - version-update:semver-major
