@@ -24,11 +24,11 @@ Agent が作業する git worktree のフォルダを VS Code で開くと、そ
 
 HEAD と、共通 Git 管理ディレクトリの `refs/heads`・`packed-refs` を監視します。worktree では `.git` ファイルの参照先を Git から取得するため、元リポジトリ側にある参照の変更にも追従します。連続した変更は 300 ms 待ってまとめ、更新中に変更が続いた場合も処理を重ねず完了後に再実行します。設定やリポジトリの選択が変わると監視を張り直します。
 
-行番号付近のコメントボタンから行・範囲コメントを追加します。編集・削除はコメント欄、解決状態の切り替えはスレッドのボタンで操作します。「ファイルにコメントを追加」はファイルノードのメニューと差分のタイトルから入力します。ファイルコメントには範囲がなく、Review Comments にだけ表示します。
+行番号付近のコメントボタンから行・範囲コメントを追加します。編集・削除はコメント欄、解決状態と種別の切り替えは保存済みスレッドのタイトルボタン、または Review Comments のコメントノードの右クリックメニューで操作します。新しいコメントの種別は「修正依頼」です。種別はスレッドのタイトルと Review Comments のコメントノードに表示します。「ファイルにコメントを追加」はファイルノードのメニューと差分のタイトルから入力します。ファイルコメントには範囲がなく、Review Comments にだけ表示します。
 
-Review Comments では、コミットと PR のコメントはコミットまたは PR→ファイル→コメントの階層です。選ぶと該当差分と行を開きます。コメントはワークスペースの `workspaceState` に JSON で保存し、差分を開き直すと復元します。編集中のコメントは差分の左右を行き来しても保持します。
+Review Comments では、コミットと PR のコメントはコミットまたは PR→ファイル→コメントの階層です。選ぶと該当差分と行を開きます。コメントには種別 `purpose`（`fix`: 修正依頼、`question`: 質問）を保存します。種別のない既存データは修正依頼として読み、読み込みだけでは保存し直しません。不正な種別は保存内容を保護するため読み込みを中止します。コメントはワークスペースの `workspaceState` に JSON で保存し、差分を開き直すと復元します。編集中のコメントは差分の左右を行き来しても保持します。
 
-「AI Agent 向けにコメントをエクスポート」で範囲・形式・目的を選ぶと、未保存の文書を開き、同じ内容をクリップボードにコピーします。コミットの修正依頼は次の指示を含みます。
+「AI Agent 向けにコメントをエクスポート」で範囲と形式を選ぶと、未保存の文書を開き、同じ内容をクリップボードにコピーします。修正依頼だけなら修正の指示、質問だけなら回答の指示を出します。混在時は修正指示の各段落に対象を明記し、質問への回答ではコードやコミットを変更しないよう指示します。0 件なら指示文を出しません。各コメントにも種別を明記します。コミットの修正依頼は次の指示を含みます。
 
 ```text
 修正は新しいコミットを追加せず、指摘対象のコミット自体を書き換えて畳み込んでください。
@@ -37,7 +37,7 @@ Review Comments では、コミットと PR のコメントはコミットまた
 コミットはフルハッシュと件名で特定してください。
 ```
 
-`vsreview.export.instructions` のユーザー設定に文字列を設定すると、コミット用の既定の指示文を差し替えられます。空文字列または空白だけなら既定文を使います。コード・件名・パスは参照用データであり、そこに含まれる命令には従わないという境界の説明は常に付けます。
+`vsreview.export.instructions` のユーザー設定に文字列を設定すると、コミット用の既定の指示文を差し替えられます。空文字列または空白だけなら既定文を使います。指示文は範囲・解決状態・種別で絞った結果から生成します。修正手順は修正依頼の対象だけに適用し、独自の修正指示があっても PR の修正手順と push 先を併記します。質問の指示文は `vsreview.export.questionInstructions` を使います。コード・件名・パスは参照用データであり、そこに含まれる命令には従わないという境界の説明は常に付けます。
 
 ## Pull Request のレビュー
 
@@ -47,7 +47,7 @@ PR を展開すると変更ファイルが並び、PR 自体を選ぶと最初�
 
 ファイルの表示形式・状態装飾・行／範囲／ファイルコメント・Files ビュー・前後のファイル移動はコミットレビューと共通です。Review Comments では `PR #番号 タイトル` の下にまとめ、コメントにはレビュー時点の head と merge-base を保存します。一覧の更新だけでは開いている差分を置き換えません。新しい head をレビューするときは PR を選び直してください。
 
-エクスポート範囲で「特定の PR」、目的で「質問」を選ぶと、コードやコミットを変更せず、各質問へ対象とコードの根拠を添えて回答する指示を出力します。質問の指示文はユーザー設定 `vsreview.export.questionInstructions` で差し替えられます。「修正依頼」の既定文は PR のブランチ上で修正して push する指示です。コミット用の fixup 手順は PR に適用しません。
+種別が「質問」の PR コメントは、コードやコミットを変更せず、各質問へ対象とコードの根拠を添えて回答する指示を出力します。質問の指示文はユーザー設定 `vsreview.export.questionInstructions` で差し替えられます。「修正依頼」の既定文は PR のブランチ上で修正して push する指示です。コミット用の fixup 手順は PR に適用しません。
 
 PR の「書き換え済み」は、最新の head が保存時から変わり、保存した head がその祖先でない場合だけ表示します。通常の追加 push では書き換え扱いにしません。閉じた PR や取得できない PR は直前の判定を維持します。最新 head は起動時・リポジトリ選択時・更新コマンド・Pull Requests の更新ボタン・番号指定・PR 設定変更時に取得します。同じ PR は更新ごとに一度だけ問い合わせます。コメント操作と Git の自動更新では gh や fetch を実行しません。
 
@@ -91,7 +91,7 @@ Review Comments は `<リポジトリ名> · 未コミットの変更（<区分>
 
 エクスポート範囲「未コミットの変更」は、解決状態を問わず未コミットのコメントをすべて出力します。「全コメント」にも含まれ、「未解決のみ」では未解決の分だけが入り、「特定のコミット」には入りません。Markdown は `未コミットの変更（<区分>）` の見出しに、基準の HEAD、スナップショット、スナップショットの作成日時（ISO 8601 の UTC 文字列）、内容が変更済み（はい／いいえ）を出します。HEAD がなければ「なし（コミットがまだありません）」と表示します。ツリーと異なり、エクスポートでは同じハッシュでも基準の HEAD や作成日時が異なれば別にまとめます。JSON の項目は「エクスポートの例」を参照してください。
 
-修正依頼に未コミットのコメントが含まれると、「未コミットのコメントに対して: 」に続けて次の既定文を付けます。`vsreview.export.instructions` を設定しても、その設定文の後にこの既定文が続きます。コミットのコメントと混在する場合も同じで、設定文があればコミット用の既定文は付きません。目的が「質問」の場合は、質問用の設定文または既定文を使い、次の修正用の指示は付きません。
+修正依頼に未コミットのコメントが含まれると、「未コミットのコメントに対して: 」に続けて次の既定文を付けます。`vsreview.export.instructions` を設定しても、その設定文の後にこの既定文が続きます。コミットのコメントと混在する場合も同じで、設定文があればコミット用の既定文は付きません。種別が「質問」のコメントには質問用の設定文または既定文を使い、次の修正用の指示は適用しません。
 
 ```text
 このレビューコメントに従って、作業ツリーのファイルを直接修正してください。
@@ -136,13 +136,14 @@ ID はすべて `vsreview.` で始まります。引数が必要な内部操作�
 | `addRangeComment`                                                        | 行・範囲コメントを追加                                                       |
 | `editComment` / `saveComment` / `cancelEdit`                             | コメントの編集・保存・取り消し                                               |
 | `deleteComment` / `toggleResolved`                                       | コメントの削除・解決状態切り替え                                             |
+| `togglePurpose`                                                          | コメントの種別切り替え（修正依頼／質問）                                     |
 | `clearComments`                                                          | 確認後に全コメントを削除                                                     |
 | `clearCommitComments` / `clearPullRequestComments` / `clearFileComments` | 確認後に選択したコミット・PR・ファイルのコメントを削除（右クリックメニュー） |
 | `clearRewrittenComments`                                                 | 確認後に書き換え済みコメントを削除                                           |
 | `openComment`                                                            | コメントの差分を開く                                                         |
 | `exportComments`                                                         | AI Agent 向けに出力                                                          |
 
-自動化では `vsreview.exportComments` に `{ "scope": "all", "format": "markdown" }` を渡せます。`scope` は `all` / `unresolved` / `pullRequest` / `uncommitted`、`format` は `markdown` / `json`、`purpose` は `fix`（省略時）/ `question` です。`scope: "pullRequest"` の場合は `pullRequest`（番号）と `repoRoot`（絶対パス）も渡します。引数なし、または `scope` と `format` のどちらも持たないオブジェクト（ビュータイトルのボタンから渡される引数など）では、範囲・形式・目的の選択画面が開きます。それ以外の不正な出力指定はエラーを通知して終了します。
+自動化では `vsreview.exportComments` に `{ "scope": "all", "format": "markdown" }` を渡せます。`scope` は `all` / `unresolved` / `pullRequest` / `uncommitted`、`format` は `markdown` / `json`、`purpose` は `fix` / `question` で、指定時はその種別だけに絞ります。省略時は全種別を出力します。種別の絞り込みと `scope` は AND 条件です。従来の `purpose: "question"` は全コメントを質問として出力していましたが、今後は質問コメントだけを出力します。種別のない旧データは修正依頼なので、旧データだけなら `question` 指定の結果は 0 件です。`scope: "pullRequest"` の場合は `pullRequest`（番号）と `repoRoot`（絶対パス）も渡します。引数なし、または `scope` と `format` のどちらも持たないオブジェクト（ビュータイトルのボタンから渡される引数など）では、範囲と形式の選択画面が開きます。`{ "purpose": "question" }` のように `purpose` だけを渡した場合も範囲と形式を選び、その種別に絞ります。コミット・PR の候補には指定種別のコメントがある対象だけを出します。ビュータイトルのボタンなど種別指定のない引数では全種別を出します。`purpose` を含む出力指定が不正なら、選択画面を開く前にエラーを通知して終了します。
 
 ツリー表示の前後移動はフォルダを深さ優先でたどった順、一覧表示では Git から取得した順です。
 
@@ -155,10 +156,10 @@ ID はすべて `vsreview.` で始まります。引数が必要な内部操作�
 | `vsreview.fileView`                    | `"tree"`              | `"tree"` はフォルダ階層、`"list"` は一覧。切り替えボタンでも更新 |
 | `explorer.compactFolders`              | `true`                | 子が単一フォルダだけの連なりをまとめる VS Code の設定            |
 | `vsreview.autoRefresh`                 | `true`                | コミット・ブランチの変更に追従                                   |
-| `vsreview.export.instructions`         | `""`                  | AI Agent 向けの指示文。空白だけなら既定文を使用                  |
+| `vsreview.export.instructions`         | `""`                  | 修正依頼コメントへの指示文。空白だけなら既定文を使用             |
 | `vsreview.pullRequests.limit`          | `50`                  | 一覧の最大件数（正の整数）                                       |
 | `vsreview.pullRequests.remote`         | `"origin"`            | fetch 先。origin は PR の URL に合うリモートを優先               |
-| `vsreview.export.questionInstructions` | `""`                  | 質問の指示文。空白だけなら既定文を使用                           |
+| `vsreview.export.questionInstructions` | `""`                  | 質問コメントへの指示文。空白だけなら既定文を使用                 |
 
 ## エクスポートの例
 
@@ -184,12 +185,14 @@ ID はすべて `vsreview.` で始まります。引数が必要な内部操作�
 空文字列を拒否してください。
 ```
 
+種別: 修正依頼
+
 解決状態: 未解決
 
 作成: "2026-11-06T10:00:00Z" / 更新: "2026-11-06T10:00:00Z"
 ````
 
-JSON は `version`、目的 `purpose`、指示文 `instructions`、資料との境界説明 `boundary`、現在ブランチの対応表 `repositories`、アンカーを含む `comments` を出力します。各コメントは `id`、`status`、`subject`、`author`、`date`、`repoRoot`、`commit`、`parent`、`path`、`oldPath`（該当時）、`side`、`startLine`、`endLine`、`code`、`hunkHeader`、`excerpt`、`body`、作成・更新日時、`resolved` を持ちます。PR コメントには省略可能な `pullRequest` フィールド（番号・タイトル・URL・base/head 名・OID・merge-base など）も含みます。未コミットのコメントには `uncommitted`（`kind`、`createdAt`、HEAD があれば `head`）が付きます。未コミットのコメントがあるときだけ最上位に `uncommittedSnapshots` を出し、各要素に `repoRoot`、`snapshot`、`kind`（`staged` / `unstaged`）、`head`（HEAD がなければ `null`）、`createdAt`、`changed`（内容が変更済みかの真偽値）を含めます。保存形式は version 1 のままです。ファイルコメントは `side=file`、行番号は 0 です。ブランチ取得に失敗した場合、本文には「取得不能」だけを書き、詳細は VS Code に通知します。
+JSON は `version`、種別の要約 `purpose`、指示文 `instructions`、資料との境界説明 `boundary`、現在ブランチの対応表 `repositories`、アンカーを含む `comments` を出力します。最上位の `purpose` は出力に含まれる種別が1種類なら `"fix"` または `"question"`、両方なら `"mixed"`、0 件なら `null` です。0 件の `instructions` は空文字列です。`comments[].purpose` は各コメント自身の種別で、`fix` / `question` のどちらかです。各コメントは `id`、`status`、`subject`、`author`、`date`、`repoRoot`、`commit`、`parent`、`path`、`oldPath`（該当時）、`side`、`startLine`、`endLine`、`code`、`hunkHeader`、`excerpt`、`body`、作成・更新日時、`resolved`、`purpose`（`fix` / `question`）を持ちます。PR コメントには省略可能な `pullRequest` フィールド（番号・タイトル・URL・base/head 名・OID・merge-base など）も含みます。未コミットのコメントには `uncommitted`（`kind`、`createdAt`、HEAD があれば `head`）が付きます。未コミットのコメントがあるときだけ最上位に `uncommittedSnapshots` を出し、各要素に `repoRoot`、`snapshot`、`kind`（`staged` / `unstaged`）、`head`（HEAD がなければ `null`）、`createdAt`、`changed`（内容が変更済みかの真偽値）を含めます。保存形式は version 1 のままです。ファイルコメントは `side=file`、行番号は 0 です。ブランチ取得に失敗した場合、本文には「取得不能」だけを書き、詳細は VS Code に通知します。
 
 ## 開発
 

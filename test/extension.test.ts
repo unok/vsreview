@@ -166,6 +166,9 @@ describe('extension', () => {
       await waitFor(() =>
         expect(commands.executeCommand).toHaveBeenCalledWith('setContext', 'vsreview.isReviewDocument', false),
       );
+      // 起動時の履歴更新も Files の同期を要求するため、一覧更新を完了させてから
+      // このテストで扱うタブ変更の競合を作る。
+      await commands.executeCommand('vsreview.refresh');
       Object.assign(api.filesTree.view, { visible: true });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
@@ -728,7 +731,8 @@ describe('extension', () => {
       vi.spyOn(GhClient.prototype, 'list').mockResolvedValue([pullRequest]);
       const comment = { ...saved, repoRoot: source };
       const state = new MemoryState();
-      state.value = serialize([comment]);
+      const question = { ...comment, id: 'question', purpose: 'question' as const };
+      state.value = serialize([comment, question]);
       workspace.workspaceFolders = [workspaceFolder(source)];
       const api = (await activate(extensionContext(state)))!;
       await waitFor(() => expect(api.pullRequestsTree.view.message).toBe(''));
@@ -739,7 +743,39 @@ describe('extension', () => {
         format: 'json',
         purpose: 'question',
       });
-      expect(JSON.parse(docs.at(-1)!.getText())).toMatchObject({ purpose: 'question', comments: [comment] });
+      expect(JSON.parse(docs.at(-1)!.getText())).toMatchObject({ purpose: 'question' });
+      expect((JSON.parse(docs.at(-1)!.getText()) as { comments: unknown[] }).comments).toEqual([question]);
+    });
+    it('種別のない旧データは修正依頼として出力し、質問だけの出力には含めない', async () => {
+      const { source, saved, pullRequest } = await pullRequestRepository();
+      vi.spyOn(GhClient.prototype, 'list').mockResolvedValue([pullRequest]);
+      const legacy = Object.fromEntries(
+        Object.entries({ ...saved, repoRoot: source }).filter(([key]) => key !== 'purpose'),
+      );
+      const state = new MemoryState();
+      state.value = { version: 1, comments: [legacy] };
+      workspace.workspaceFolders = [workspaceFolder(source)];
+      const api = (await activate(extensionContext(state)))!;
+      await waitFor(() => expect(api.pullRequestsTree.view.message).toBe(''));
+      await commands.executeCommand('vsreview.exportComments', {
+        scope: 'pullRequest',
+        pullRequest: 12,
+        repoRoot: source,
+        format: 'json',
+        purpose: 'question',
+      });
+      expect(JSON.parse(docs.at(-1)!.getText())).toMatchObject({ purpose: null, comments: [], instructions: '' });
+      await commands.executeCommand('vsreview.exportComments', {
+        scope: 'pullRequest',
+        pullRequest: 12,
+        repoRoot: source,
+        format: 'json',
+        purpose: 'fix',
+      });
+      expect(JSON.parse(docs.at(-1)!.getText())).toMatchObject({ purpose: 'fix' });
+      expect((JSON.parse(docs.at(-1)!.getText()) as { comments: unknown[] }).comments).toEqual([
+        { ...legacy, purpose: 'fix' },
+      ]);
     });
     it('PR 設定変更の再読込に失敗したら理由を通知する', async () => {
       const { directory } = await repository();

@@ -331,6 +331,7 @@ describe('files', () => {
         await comments.addRangeComment({ thread, text: 'unchanged comment' });
         const saved = comments.all.at(-1)!;
         expect(saved).toMatchObject({
+          purpose: 'fix',
           commit: commit.hash,
           path: 'stable.ts',
           status: 'M',

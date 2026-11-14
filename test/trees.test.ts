@@ -23,6 +23,43 @@ import { createUncommittedChanges } from '../src/git/uncommitted';
 import type { UncommittedChanges } from '../src/core/uncommitted';
 
 describe('trees', () => {
+  it.each(['fix', 'question'] as const)(
+    '種別 %s を表示し、解決アイコン・本文・書き換え表示を保持する',
+    async (purpose) => {
+      const access = await accessFor((await repository()).directory);
+      const rewritten = new RewrittenComments(() => Promise.resolve([]), access, { latestHead: () => undefined });
+      disposeAfter(rewritten);
+      vi.spyOn(rewritten, 'has').mockReturnValue(true);
+      const tree = new CommentsTree(() => [], rewritten);
+      disposeAfter(tree);
+      for (const resolved of [false, true]) {
+        const comment = { ...reviewComment, purpose, resolved };
+        const item = tree.getTreeItem({ kind: 'comment', comment });
+        expect(item.description).toBe(`new L3-L4 · ${purpose === 'fix' ? '修正依頼' : '質問'} · 書き換え済み`);
+        expect(item.iconPath).toEqual(new ThemeIcon(resolved ? 'pass' : 'comment'));
+        expect(item.label).toBe(comment.body);
+        expect(item.command?.arguments).toEqual([comment]);
+      }
+      expect(tree.getTreeItem({ kind: 'comment', comment: { ...reviewComment, purpose, body: ' \n ' } }).label).toBe(
+        'コメント',
+      );
+    },
+  );
+
+  it('通常の行・ファイルコメントの種別を接尾辞なしで表示する', async () => {
+    const access = await accessFor((await repository()).directory);
+    const rewritten = new RewrittenComments(() => Promise.resolve([]), access, { latestHead: () => undefined });
+    disposeAfter(rewritten);
+    const tree = new CommentsTree(() => [], rewritten);
+    disposeAfter(tree);
+    const comment = { ...reviewComment, purpose: 'question' as const };
+    expect(tree.getTreeItem({ kind: 'comment', comment }).description).toBe('new L3-L4 · 質問');
+    expect(
+      tree.getTreeItem({ kind: 'comment', comment: { ...comment, side: 'file', startLine: 0, endLine: 0 } })
+        .description,
+    ).toBe('ファイル全体 · 質問');
+  });
+
   it.each([false, true])('reload待機中の新しいスナップショットを保つ: 履歴変更=%s', async (historyChanged) => {
     const { directory, git } = await repository();
     await writeFile(join(directory, 'a'), 'base');
@@ -122,7 +159,7 @@ describe('trees', () => {
     expect(tree.getTreeItem(files[0]!).contextValue).toBe('commentFile');
     const leaf = tree.getChildren(files[0])[0]!;
     expect(tree.getTreeItem(leaf)).toMatchObject({
-      description: 'new L3-L4 · 内容が変更済み',
+      description: 'new L3-L4 · 修正依頼 · 内容が変更済み',
       tooltip: `${staged.body}\n\n${staged.excerpt}`,
       command: { command: 'vsreview.openComment', arguments: [staged] },
     });

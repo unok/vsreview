@@ -132,6 +132,11 @@
         "icon": "$(check)"
       },
       {
+        "command": "vsreview.togglePurpose",
+        "title": "VSReview: コメントの種別を切り替え",
+        "icon": "$(arrow-swap)"
+      },
+      {
         "command": "vsreview.clearComments",
         "title": "VSReview: コメントを全削除",
         "icon": "$(clear-all)"
@@ -262,6 +267,10 @@
           "when": "view == vsreview.comments && viewItem == comment"
         },
         {
+          "command": "vsreview.togglePurpose",
+          "when": "view == vsreview.comments && viewItem == comment"
+        },
+        {
           "command": "vsreview.openPullRequest",
           "when": "view == vsreview.pullRequests && viewItem == pullRequest"
         },
@@ -347,6 +356,11 @@
           "when": "commentController == vsreview && commentThread == vsreview.savedThread"
         },
         {
+          "command": "vsreview.togglePurpose",
+          "group": "navigation",
+          "when": "commentController == vsreview && commentThread == vsreview.savedThread"
+        },
+        {
           "command": "vsreview.deleteComment",
           "group": "navigation",
           "when": "commentController == vsreview && commentThread == vsreview.savedThread"
@@ -390,6 +404,10 @@
           "when": "false"
         },
         {
+          "command": "vsreview.togglePurpose",
+          "when": "false"
+        },
+        {
           "command": "vsreview.openComment",
           "when": "false"
         },
@@ -429,7 +447,7 @@
         "vsreview.export.instructions": {
           "type": "string",
           "default": "",
-          "description": "AI Agent 向けの指示文。空文字列ならコミットを書き換える既定の指示を使います。",
+          "description": "修正依頼コメントへの指示文。空文字列または空白だけなら対象に応じた既定文を使います。",
           "scope": "application"
         },
         "vsreview.autoRefresh": {
@@ -464,7 +482,7 @@
           "type": "string",
           "default": "",
           "scope": "application",
-          "description": "質問としてエクスポートするときの指示文。空白だけならコードを変更せず回答を求める既定文を使います。"
+          "description": "質問コメントへの指示文。空白だけならコードを変更せず回答を求める既定文を使います。"
         },
         "vsreview.revisionArchive.linkPaths": {
           "type": "array",

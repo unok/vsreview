@@ -14,6 +14,7 @@ import {
   shortHash,
   locationLabel,
   resolvedLabel,
+  commentPurposeLabel,
   uncommittedLabel,
   UNCOMMITTED_CHANGED_LABEL,
 } from '../core/presentation';
@@ -190,7 +191,7 @@ export class ReviewComments implements vscode.Disposable {
         }
       }
       // 同じ値の再代入でも VS Code が入力欄を作り直し、フォーカスが失われるため変更時だけ更新する。
-      const label = `${comment.uncommitted ? uncommittedLabel(comment.uncommitted.kind) : shortHash(comment.commit)} · ${locationLabel(comment)} · ${resolvedLabel(comment.resolved)}`;
+      const label = `${comment.uncommitted ? uncommittedLabel(comment.uncommitted.kind) : shortHash(comment.commit)} · ${locationLabel(comment)} · ${commentPurposeLabel(comment.purpose)} · ${resolvedLabel(comment.resolved)}`;
       const state = comment.resolved ? vscode.CommentThreadState.Resolved : vscode.CommentThreadState.Unresolved;
       if (thread.label !== label) {
         thread.label = label;
@@ -316,6 +317,7 @@ export class ReviewComments implements vscode.Disposable {
       createdAt: now,
       updatedAt: now,
       resolved: false,
+      purpose: 'fix',
       subject: pullRequest?.title ?? commit.subject,
       author: pullRequest?.author.login ?? commit.author,
       date: pullRequest?.updatedAt ?? commit.date,
@@ -478,6 +480,18 @@ export class ReviewComments implements vscode.Disposable {
     if (id && this.values.some((c) => c.id === id)) {
       await this.mutate((values) =>
         values.map((c) => (c.id === id ? { ...c, resolved: !c.resolved, updatedAt: new Date().toISOString() } : c)),
+      );
+    }
+  }
+  async togglePurpose(argument: unknown): Promise<void> {
+    const id = this.id(argument);
+    if (id && this.values.some((c) => c.id === id)) {
+      await this.mutate((values) =>
+        values.map((c) =>
+          c.id === id
+            ? { ...c, purpose: c.purpose === 'fix' ? 'question' : 'fix', updatedAt: new Date().toISOString() }
+            : c,
+        ),
       );
     }
   }

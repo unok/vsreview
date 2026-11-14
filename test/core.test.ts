@@ -1,6 +1,6 @@
 import { changeMaps } from '../src/core/documents';
 import { PromiseCache } from '../src/core/collections';
-import { deserialize, serialize } from '../src/core/model';
+import { deserialize, serialize, isReviewComment } from '../src/core/model';
 import { reviewComment as comment } from './fixtures';
 import { describe, expect, it } from 'vitest';
 import { fileSide, parseLog, parseNameStatus, parseTree } from '../src/core/gitParsing';
@@ -165,6 +165,35 @@ describe('core', () => {
     });
   });
   describe('保存', () => {
+    it('旧データを変更せず種別を補完し、新旧混在と空データを読む', () => {
+      const legacy = Object.fromEntries(Object.entries(comment).filter(([key]) => key !== 'purpose'));
+      const question = { ...comment, id: 'question', purpose: 'question' as const };
+      const input = { version: 1, comments: [legacy, question] };
+      expect(deserialize(input)).toEqual([{ ...legacy, purpose: 'fix' }, question]);
+      expect(legacy).not.toHaveProperty('purpose');
+      expect(isReviewComment(legacy)).toBe(false);
+      expect(isReviewComment({ ...legacy, purpose: 'fix' })).toBe(true);
+      expect(isReviewComment(question)).toBe(true);
+      expect(deserialize(JSON.parse(JSON.stringify(serialize([question]))))).toEqual([question]);
+      expect(serialize([question]).version).toBe(1);
+      expect(deserialize(undefined)).toEqual([]);
+      expect(deserialize({ version: 1, comments: [] })).toEqual([]);
+    });
+    it.each([null, '', ' ', 'FIX', 'Question', 'edit', 0, true, false, [], {}])(
+      '不正な種別 %j が1件でもあれば全体を拒否する',
+      (purpose) => {
+        const input = { version: 1, comments: [comment, { ...comment, purpose }] };
+        expect(() => deserialize(input)).toThrow('保存されたレビューコメントの形式が不正です');
+        expect(isReviewComment({ ...comment, purpose })).toBe(false);
+      },
+    );
+    it('未知キーは受け入れ、種別補完でも既存の不正アンカーは拒否する', () => {
+      expect(deserialize({ version: 1, comments: [{ ...comment, future: true }] })[0]).toMatchObject({ future: true });
+      const legacy = Object.fromEntries(Object.entries(comment).filter(([key]) => key !== 'purpose'));
+      expect(() => deserialize({ version: 1, comments: [{ ...legacy, startLine: 0 }] })).toThrow(
+        '保存されたレビューコメントの形式が不正です',
+      );
+    });
     it('JSON を往復し、壊れた保存データを拒否する', () => {
       expect(deserialize(serialize([comment]))).toEqual([comment]);
       expect(() => deserialize({ version: 1, comments: [{}] })).toThrow('保存されたレビューコメントの形式が不正です');

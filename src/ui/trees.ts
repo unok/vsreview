@@ -13,6 +13,7 @@ import {
   relativeDate,
   shortHash,
   locationLabel,
+  commentPurposeLabel,
   commentCountLabel,
   rewrittenSuffix,
   uncommittedChangedSuffix,
@@ -351,7 +352,7 @@ export class CommentsTree implements vscode.TreeDataProvider<CommentNode>, vscod
     }
     const c = node.comment;
     const item = new vscode.TreeItem(c.body.split(/\r?\n/).find((line) => line.trim()) ?? 'コメント');
-    item.description = `${locationLabel(c)}${c.uncommitted ? uncommittedChangedSuffix(this.rewritten.has(c)) : rewrittenSuffix(this.rewritten.has(c))}`;
+    item.description = `${locationLabel(c)} · ${commentPurposeLabel(c.purpose)}${c.uncommitted ? uncommittedChangedSuffix(this.rewritten.has(c)) : rewrittenSuffix(this.rewritten.has(c))}`;
     item.tooltip = c.uncommitted && c.side !== 'file' ? `${c.body}\n\n${commentExcerpt(c)}` : c.body;
     item.contextValue = 'comment';
     item.iconPath = new vscode.ThemeIcon(c.resolved ? 'pass' : 'comment');

@@ -1,4 +1,4 @@
-import type { ReviewComment } from './model';
+import type { CommentPurpose, ReviewComment } from './model';
 import type { UncommittedKind } from './uncommitted';
 export const UNCOMMITTED_LABEL = '未コミットの変更';
 export const UNCOMMITTED_CHANGED_LABEL = '内容が変更済み';
@@ -17,6 +17,9 @@ export function shortHash(hash: string): string {
 }
 export function locationLabel(comment: Pick<ReviewComment, 'side' | 'startLine' | 'endLine'>): string {
   return comment.side === 'file' ? 'ファイル全体' : `${comment.side} L${comment.startLine}-L${comment.endLine}`;
+}
+export function commentPurposeLabel(purpose: CommentPurpose): string {
+  return purpose === 'fix' ? '修正依頼' : '質問';
 }
 export function resolvedLabel(resolved: boolean): string {
   return resolved ? '解決済み' : '未解決';

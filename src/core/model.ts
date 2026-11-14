@@ -3,7 +3,13 @@ import { isPullRequestReview, isPullRequestComparisonFor, type PullRequestReview
 import { hasStrings, isRecord, isRevision, isRepoPath, isOptionalRepoPath } from './validation';
 import { isStatus, type Status } from './gitParsing';
 import { isUncommittedSnapshot, type UncommittedSnapshot } from './uncommitted';
+const COMMENT_PURPOSES = ['fix', 'question'] as const;
+export type CommentPurpose = (typeof COMMENT_PURPOSES)[number];
+export function isCommentPurpose(value: unknown): value is CommentPurpose {
+  return COMMENT_PURPOSES.some((purpose) => purpose === value);
+}
 export interface ReviewComment {
+  purpose: CommentPurpose;
   pullRequest?: PullRequestReview;
   uncommitted?: UncommittedSnapshot;
   id: string;
@@ -50,7 +56,11 @@ function hasValidLines(value: Record<string, unknown>): boolean {
     (value.side !== 'file' || value.endLine === 0)
   );
 }
+type StoredReviewComment = Omit<ReviewComment, 'purpose'> & { purpose?: CommentPurpose };
 export function isReviewComment(value: unknown): value is ReviewComment {
+  return isStoredReviewComment(value) && value.purpose !== undefined;
+}
+function isStoredReviewComment(value: unknown): value is StoredReviewComment {
   if (!isRecord(value)) {
     return false;
   }
@@ -72,6 +82,7 @@ export function isReviewComment(value: unknown): value is ReviewComment {
   ];
   const validSide = value.side === 'old' || value.side === 'new' || value.side === 'file';
   return (
+    (value.purpose === undefined || isCommentPurpose(value.purpose)) &&
     hasStrings(value, strings) &&
     (value.uncommitted === undefined ||
       (value.pullRequest === undefined && isUncommittedSnapshot(value.uncommitted))) &&
@@ -95,11 +106,11 @@ export function deserialize(value: unknown): ReviewComment[] {
     !isRecord(value) ||
     value.version !== 1 ||
     !Array.isArray(value.comments) ||
-    !value.comments.every(isReviewComment)
+    !value.comments.every(isStoredReviewComment)
   ) {
     throw new Error('保存されたレビューコメントの形式が不正です。保存内容を保護するため読み込みを中止しました');
   }
-  return value.comments;
+  return value.comments.map((comment) => ({ ...comment, purpose: comment.purpose ?? 'fix' }));
 }
 
 export function selectComments(
