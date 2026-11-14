@@ -14,7 +14,7 @@ import type { ReviewDiff } from './diff';
 import type { RepositoryAccess } from './repositories';
 import { commentContextValue, type CommentNode, type CommitsTree } from './trees';
 import { comparisonKey, commitKey } from '../core/comparisons';
-import { isReviewComment, type ReviewComment } from '../core/model';
+import { isReviewComment, isCommentPurpose, type ReviewComment } from '../core/model';
 import type { RewrittenComments } from './rewritten';
 import { basename } from 'node:path';
 import { registerCommand, showError, showInfo, showStatus } from './common';
@@ -186,12 +186,14 @@ export function registerReviewCommands(
   });
   command('exportComments', (arg) => {
     // view/title は { $treeViewId } を渡すため、出力指定のないオブジェクトも対話に進める。
-    if (!isExportRequest(arg) && !hasNoExportSpec(arg)) {
+    const request = isExportRequest(arg) ? arg : undefined;
+    const purpose = request ? request.purpose : isRecord(arg) ? arg.purpose : undefined;
+    if ((purpose !== undefined && !isCommentPurpose(purpose)) || (!request && !hasNoExportSpec(arg))) {
       throw new Error('エクスポートの出力指定が不正です');
     }
     return exportComments(comments.all, access, {
       currentRepo: commitsTree.git?.root,
-      request: isExportRequest(arg) ? arg : undefined,
+      request: request ?? (purpose === undefined ? undefined : { purpose }),
       rewritten: rewritten.has,
     });
   });

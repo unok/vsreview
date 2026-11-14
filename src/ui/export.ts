@@ -1,4 +1,11 @@
-import { selectComments, isCommitComment, type ReviewComment, type CommentPurpose } from '../core/model';
+import { vsreviewConfiguration } from './configuration';
+import {
+  selectComments,
+  isCommitComment,
+  isCommentPurpose,
+  type ReviewComment,
+  type CommentPurpose,
+} from '../core/model';
 import { commitKey, reviewGroupKey } from '../core/comparisons';
 import * as vscode from 'vscode';
 import { groupBy } from '../core/collections';
@@ -21,7 +28,7 @@ export function isExportRequest(value: unknown): value is ExportRequest {
       value.scope === 'unresolved' ||
       value.scope === 'uncommitted' ||
       (value.scope === 'pullRequest' && isPositiveInteger(value.pullRequest) && typeof value.repoRoot === 'string')) &&
-    (value.purpose === undefined || value.purpose === 'fix' || value.purpose === 'question') &&
+    (value.purpose === undefined || isCommentPurpose(value.purpose)) &&
     (value.format === 'markdown' || value.format === 'json')
   );
 }
@@ -34,12 +41,15 @@ export async function exportComments(
     rewritten,
   }: {
     currentRepo?: string | undefined;
-    request?: ExportRequest | undefined;
+    request?: ExportRequest | Pick<ExportRequest, 'purpose'> | undefined;
     rewritten?: (comment: ReviewComment) => boolean;
   } = {},
 ): Promise<void> {
+  const specified = request && 'scope' in request ? request : undefined;
+  const purpose = request?.purpose;
+  const candidates = purpose === undefined ? comments : comments.filter((comment) => comment.purpose === purpose);
   const scope =
-    request ??
+    specified ??
     (await vscode.window.showQuickPick(
       [
         { label: '全コメント', scope: 'all' },
@@ -53,13 +63,13 @@ export async function exportComments(
   if (!scope) {
     return;
   }
-  let selected = selectComments(comments, { unresolvedOnly: scope.scope === 'unresolved' });
+  let selected = selectComments(candidates, { unresolvedOnly: scope.scope === 'unresolved' });
   if (scope.scope === 'uncommitted') {
-    selected = comments.filter((comment) => comment.uncommitted);
+    selected = candidates.filter((comment) => comment.uncommitted);
   }
   if (scope.scope === 'commit') {
     const pick = await vscode.window.showQuickPick(
-      [...groupBy(comments.filter(isCommitComment), commitKey).values()].flatMap((group) => {
+      [...groupBy(candidates.filter(isCommitComment), commitKey).values()].flatMap((group) => {
         const c = group[0];
         return c
           ? [
@@ -77,15 +87,15 @@ export async function exportComments(
     if (!pick) {
       return;
     }
-    selected = selectComments(comments.filter(isCommitComment), { commit: pick.commit, repoRoot: pick.repoRoot });
+    selected = selectComments(candidates.filter(isCommitComment), { commit: pick.commit, repoRoot: pick.repoRoot });
   }
   if (scope.scope === 'pullRequest') {
     const pick =
-      request ??
+      specified ??
       (await vscode.window.showQuickPick(
         [
           ...groupBy(
-            comments.filter((c) => c.pullRequest),
+            candidates.filter((c) => c.pullRequest),
             reviewGroupKey,
           ).values(),
         ].flatMap((group) => {
@@ -106,10 +116,10 @@ export async function exportComments(
     if (!pick || pick.repoRoot === undefined || pick.pullRequest === undefined) {
       return;
     }
-    selected = selectComments(comments, { repoRoot: pick.repoRoot, pullRequestNumber: pick.pullRequest });
+    selected = selectComments(candidates, { repoRoot: pick.repoRoot, pullRequestNumber: pick.pullRequest });
   }
   const format =
-    request?.format ??
+    specified?.format ??
     (
       await vscode.window.showQuickPick(
         [
@@ -120,20 +130,6 @@ export async function exportComments(
       )
     )?.format;
   if (!format) {
-    return;
-  }
-  const purpose = request
-    ? (request.purpose ?? 'fix')
-    : (
-        await vscode.window.showQuickPick(
-          [
-            { label: '修正依頼', purpose: 'fix' as const },
-            { label: '質問', purpose: 'question' as const },
-          ],
-          { title: 'エクスポート目的' },
-        )
-      )?.purpose;
-  if (!purpose) {
     return;
   }
   const branches = new Map<string, string>();
@@ -150,14 +146,15 @@ export async function exportComments(
       showError(error);
     }
   }
-  const value: unknown = vscode.workspace
-    .getConfiguration('vsreview')
-    .inspect(purpose === 'question' ? 'export.questionInstructions' : 'export.instructions')?.globalValue;
-  const instructions = typeof value === 'string' ? value : '';
+  const configuration = vsreviewConfiguration();
+  const [instructions, questionInstructions] = ['export.instructions', 'export.questionInstructions'].map((key) => {
+    const value: unknown = configuration.inspect(key)?.globalValue;
+    return typeof value === 'string' ? value : '';
+  });
   const content =
     format === 'json'
-      ? exportJson(selected, branches, instructions, purpose, rewritten)
-      : exportMarkdown(selected, branches, instructions, purpose, rewritten);
+      ? exportJson(selected, branches, instructions, questionInstructions, rewritten)
+      : exportMarkdown(selected, branches, instructions, questionInstructions, rewritten);
   const doc = await vscode.workspace.openTextDocument({ content, language: format === 'json' ? 'json' : 'markdown' });
   await vscode.window.showTextDocument(doc);
   await vscode.env.clipboard.writeText(content);

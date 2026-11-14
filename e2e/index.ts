@@ -365,7 +365,6 @@ export async function run(): Promise<void> {
     );
     await selectQuickPick('エクスポート範囲', '未解決のみ');
     await selectQuickPick('エクスポート形式', 'JSON');
-    await selectQuickPick('エクスポート目的', '修正依頼');
     const interactiveOutput = await poll(() => {
       const doc = vscode.window.activeTextEditor?.document;
       return Promise.resolve(doc?.isUntitled && doc.languageId === 'json' ? doc : undefined);
@@ -445,18 +444,35 @@ export async function run(): Promise<void> {
     'PR コメントを保存できませんでした',
   );
   assert.equal(prComment.pullRequest?.title, 'E2E PR review');
+  // コメントスレッドのメニュー登録を含めて確かめるため、実ボタンを押す。
+  await vscode.commands.executeCommand('workbench.action.focusCommentOnCurrentLine');
+  await clickWorkbenchElement(
+    visibleElementExpression(
+      `[...document.querySelectorAll('.review-widget')].find(widget =>
+        widget.textContent.includes(${JSON.stringify(prBody)}))?.querySelector('.codicon-arrow-swap')`,
+      '保存済み PR コメントの種別切り替えボタンが表示されませんでした',
+    ),
+  );
+  await poll(
+    () =>
+      Promise.resolve(
+        api.comments.all.find((comment) => comment.id === prComment.id)?.purpose === 'question' ? true : undefined,
+      ),
+    'PR コメントの種別が質問になりませんでした',
+  );
   await writeFile(resultFile, JSON.stringify({ status: 'started', step: 'PR question export' }));
   const questionExport = vscode.commands.executeCommand('vsreview.exportComments');
   await selectQuickPick('エクスポート範囲', '特定の PR');
   await selectQuickPick('PR を選択', 'PR #12 E2E PR review');
   await selectQuickPick('エクスポート形式', 'Markdown');
-  await selectQuickPick('エクスポート目的', '質問');
   await questionExport;
   const question = vscode.window.activeTextEditor?.document.getText();
   assert.ok(question);
   assert.ok(question.includes('### PR #12 "E2E PR review"'));
   assert.ok(question.includes('コードやコミットを変更せず'));
   assert.ok(question.includes('この引数の根拠は何ですか'));
+  assert.ok(question.includes('種別: 質問'));
+  assert.ok(!question.includes('push してください'));
   assert.ok(!question.includes('fixup'));
   // 拡張のコマンドを使わず別プロセスで amend し、worktree 外の refs の監視を確かめる。
   await commitAll(latestMain.repo, 'amended by agent', { amend: true });

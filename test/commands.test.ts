@@ -455,6 +455,45 @@ describe('commands', () => {
       await commands.executeCommand('vsreview.clearComments');
       expect(comments.all).toEqual([]);
     });
+    it.each(['markdown', 'json'] as const)(
+      '対話引数の種別を保持し、ビューのボタンは全種別を出す: %s',
+      async (format) => {
+        const { api } = await setupCommentNodes((first) => [
+          { ...first, id: 'question', purpose: 'question', body: '対話の質問本文' },
+        ]);
+        const question = api.comments.all.find((comment) => comment.id === 'question')!;
+        const fixes = api.comments.all.filter((comment) => comment.id !== 'question');
+        for (const [argument, selection] of [
+          [{ purpose: 'question' }, 'question'],
+          [{ purpose: 'fix' }, 'fix'],
+          [{ $treeViewId: 'vsreview.comments' }, 'all'],
+        ] as const) {
+          pick.mockResolvedValueOnce({ scope: 'all' }).mockResolvedValueOnce({ format });
+          await commands.executeCommand('vsreview.exportComments', argument);
+          const content = docs.at(-1)!.getText();
+          const expected = selection === 'question' ? [question] : selection === 'fix' ? fixes : api.comments.all;
+          if (format === 'json') {
+            expect(JSON.parse(content)).toMatchObject({ purpose: selection === 'all' ? 'mixed' : selection });
+            expect((JSON.parse(content) as { comments: unknown[] }).comments).toEqual(expected);
+          } else {
+            expect(content.match(/^コメント本文:$/gm)).toHaveLength(expected.length);
+            expect(content.match(/^種別: 修正依頼$/gm) ?? []).toHaveLength(selection === 'question' ? 0 : fixes.length);
+            expect(content.match(/^種別: 質問$/gm) ?? []).toHaveLength(selection === 'fix' ? 0 : 1);
+          }
+          expect(env.clipboard.writeText).toHaveBeenLastCalledWith(content);
+        }
+      },
+    );
+    it('対話引数でも不正な purpose は選択画面を出す前に拒否する', async () => {
+      await activate(extensionContext());
+      for (const purpose of [null, '', 'edit', 0, false, [], {}]) {
+        await commands.executeCommand('vsreview.exportComments', { purpose });
+        expect(window.showErrorMessage).toHaveBeenLastCalledWith('VSReview: エクスポートの出力指定が不正です');
+      }
+      expect(pick).not.toHaveBeenCalled();
+      expect(docs).toEqual([]);
+      expect(env.clipboard.writeText).not.toHaveBeenCalled();
+    });
     it.each([undefined, { $treeViewId: 'vsreview.comments' }, {}])(
       '出力指定のない引数は範囲と形式を尋ね、未解決のみ出力する: %j',
       async (arg) => {
@@ -467,17 +506,13 @@ describe('commands', () => {
           comments: [comment, { ...comment, id: 'resolved', resolved: true }],
         };
         expect(await activate(context)).toBeDefined();
-        pick
-          .mockResolvedValueOnce({ scope: 'unresolved' })
-          .mockResolvedValueOnce({ format: 'json' })
-          .mockResolvedValueOnce({ purpose: 'fix' });
+        pick.mockResolvedValueOnce({ scope: 'unresolved' }).mockResolvedValueOnce({ format: 'json' });
 
         await commands.executeCommand('vsreview.exportComments', arg);
 
-        expect(pick).toHaveBeenCalledTimes(3);
+        expect(pick).toHaveBeenCalledTimes(2);
         expect(pick).toHaveBeenNthCalledWith(1, expect.any(Array), { title: 'エクスポート範囲' });
         expect(pick).toHaveBeenNthCalledWith(2, expect.any(Array), { title: 'エクスポート形式' });
-        expect(pick).toHaveBeenNthCalledWith(3, expect.any(Array), { title: 'エクスポート目的' });
         const document = docs.at(-1)!;
         const exported = JSON.parse(document.getText()) as { comments: unknown[] };
         expect(exported.comments).toEqual([comment]);

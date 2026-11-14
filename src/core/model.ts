@@ -3,7 +3,11 @@ import { isPullRequestReview, isPullRequestComparisonFor, type PullRequestReview
 import { hasStrings, isRecord, isRevision, isRepoPath, isOptionalRepoPath } from './validation';
 import { isStatus, type Status } from './gitParsing';
 import { isUncommittedSnapshot, type UncommittedSnapshot } from './uncommitted';
-export type CommentPurpose = 'fix' | 'question';
+const COMMENT_PURPOSES = ['fix', 'question'] as const;
+export type CommentPurpose = (typeof COMMENT_PURPOSES)[number];
+export function isCommentPurpose(value: unknown): value is CommentPurpose {
+  return COMMENT_PURPOSES.some((purpose) => purpose === value);
+}
 export interface ReviewComment {
   purpose: CommentPurpose;
   pullRequest?: PullRequestReview;
@@ -78,7 +82,7 @@ function isStoredReviewComment(value: unknown): value is StoredReviewComment {
   ];
   const validSide = value.side === 'old' || value.side === 'new' || value.side === 'file';
   return (
-    (value.purpose === undefined || value.purpose === 'fix' || value.purpose === 'question') &&
+    (value.purpose === undefined || isCommentPurpose(value.purpose)) &&
     hasStrings(value, strings) &&
     (value.uncommitted === undefined ||
       (value.pullRequest === undefined && isUncommittedSnapshot(value.uncommitted))) &&
