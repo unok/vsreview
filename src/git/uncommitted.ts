@@ -1,9 +1,10 @@
 import { copyFile, mkdtemp, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { UncommittedChange, UncommittedChanges, UncommittedKind } from '../core/uncommitted';
 import { isRecord } from '../core/validation';
-import { GitClient, runGit } from './client';
+import { GitClient, GitError, runGit } from './client';
 import { commandEnvironment } from './environment';
 
 const SNAPSHOT_NAME = 'VSReview';
@@ -14,12 +15,34 @@ const SNAPSHOT_MESSAGE = 'VSReview uncommitted snapshot';
 const INDEX_FILE = 'index';
 // 一時 index の操作で sharedindex.* が gitDir に作られるのを防ぐ。
 const INDEX_CONFIG = ['core.splitIndex=false'];
+const SNAPSHOT_RETRY_DELAYS_MS = [100, 300] as const;
 
 export type CaptureUncommitted = (git: GitClient) => Promise<UncommittedChanges>;
 export const captureUncommittedChanges: CaptureUncommitted = (git) =>
   createUncommittedChanges(git, new Date().toISOString());
 
 export async function createUncommittedChanges(git: GitClient, createdAt: string): Promise<UncommittedChanges> {
+  // C ロケールの Git が read で読む小さなファイルの add の short read だけ、初回を含め最大3回試す。
+  // 大きいファイルの同じ書き込み競合は別のエラーになるため再試行の対象外で、従来どおり呼び出し元の通知に任せる。
+  // 部分更新された一時 index を捨て、比較元の HEAD と実 index から取り直す。
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await createSnapshot(git, createdAt);
+    } catch (error) {
+      const delay = SNAPSHOT_RETRY_DELAYS_MS[attempt];
+      if (
+        delay === undefined ||
+        !(error instanceof GitError) ||
+        error.args[0] !== 'add' ||
+        !error.stderr.includes('short read while indexing')
+      ) {
+        throw error;
+      }
+      await sleep(delay);
+    }
+  }
+}
+async function createSnapshot(git: GitClient, createdAt: string): Promise<UncommittedChanges> {
   const head = await git.head();
   const temporary = await mkdtemp(join(tmpdir(), 'vsreview-index-'));
   try {

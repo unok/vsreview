@@ -8,6 +8,7 @@ import {
   registerPullRequestsTree,
   disposeAfter,
   waitFor,
+  ASYNC_TEST_TIMEOUT_MS,
   workspaceFolder,
   extensionContext,
   repository,
@@ -36,7 +37,8 @@ import { RewrittenComments, rewrittenTargets } from '../src/ui/rewritten';
 import { registerReviewCommands, selectRepository, updateRepository } from '../src/ui/commands';
 import { registerCommand } from '../src/ui/common';
 import { revisionUri, RevisionProvider, documentRef } from '../src/ui/revisions';
-import { GitClient, runGit } from '../src/git/client';
+import * as gitCommands from '../src/git/client';
+import { GitClient, GitError, runGit } from '../src/git/client';
 import { createUncommittedChanges } from '../src/git/uncommitted';
 import {
   activateTab,
@@ -240,6 +242,55 @@ describe('commands', () => {
     );
     expect(api.commitsTree.git?.root).toBe(git.root);
   });
+  it(
+    '明示的な未コミット取得は書き込みとの short read 競合から回復し、最新本文を返す',
+    async () => {
+      const { directory, git, api, unstaged } = await uncommittedFixture();
+      if (unstaged.kind !== 'file') {
+        throw new Error('file expected');
+      }
+      const original = gitCommands.runGit;
+      let release!: () => void;
+      const written = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let collided = false;
+      vi.spyOn(gitCommands, 'runGit').mockImplementation(async (repo, args, input, options) => {
+        if (!collided && args[0] === 'add' && options?.env?.GIT_INDEX_FILE) {
+          collided = true;
+          await written;
+          throw new GitError(
+            args,
+            'error: short read while indexing a.ts\nerror: a.ts: failed to insert into database\nfatal: updating files failed',
+            128,
+          );
+        }
+        return original(repo, args, input, options);
+      });
+      let settled = false;
+      const pending = api.commitsTree.refreshUncommitted(unstaged);
+      void pending.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      try {
+        await waitFor(() => expect(collided, '明示取得が一時 index の add に到達する').toBe(true));
+        await writeFile(join(directory, 'a.ts'), 'later');
+      } finally {
+        release();
+      }
+      await waitFor(() => expect(settled, '衝突した取得が再試行を含めて完了する').toBe(true));
+      const current = await pending;
+      expect(current, '再試行で最新の取得結果を返す').toBeDefined();
+      expect((await git.content(current!.commit.hash, 'a.ts')).text).toBe('later');
+      expect(window.showErrorMessage).not.toHaveBeenCalled();
+    },
+    ASYNC_TEST_TIMEOUT_MS * 3,
+  );
   it('ツリーのファイルコメントだけ再取得し、保存からの再起動復元は同じURIと3行目を開く', async () => {
     const { directory, state, context, api, unstaged } = await uncommittedFixture();
     if (unstaged.kind !== 'file') {
