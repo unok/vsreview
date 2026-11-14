@@ -3,7 +3,7 @@ import { deserialize, serialize } from '../src/core/model';
 import { pullRequestReview, reviewComment } from './fixtures';
 
 describe('未コミットのコメントの保存', () => {
-  it('新フィールドのない version 1 のコミット・PR コメントをそのまま読む', () => {
+  it('新フィールドのない version 1 のコミット・PR コメントに種別を補完する', () => {
     const legacy = {
       id: 'old',
       repoRoot: '/repo',
@@ -28,8 +28,9 @@ describe('未コミットのコメントの保存', () => {
     for (const comment of [legacy, { ...legacy, pullRequest: pullRequestReview }]) {
       const saved = { version: 1, comments: [comment] };
       const restored = deserialize(saved);
-      expect(restored).toEqual(saved.comments);
-      expect(serialize(restored)).toEqual(saved);
+      expect(restored).toEqual([{ ...comment, purpose: 'fix' }]);
+      expect(serialize(restored)).toEqual({ version: 1, comments: [{ ...comment, purpose: 'fix' }] });
+      expect(comment).not.toHaveProperty('purpose');
     }
   });
 

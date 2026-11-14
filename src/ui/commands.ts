@@ -157,6 +157,7 @@ export function registerReviewCommands(
   command('cancelEdit', (arg) => comments.cancelEdit(arg));
   command('deleteComment', (arg) => comments.delete(arg));
   command('toggleResolved', (arg) => comments.toggle(arg));
+  command('togglePurpose', (arg) => comments.togglePurpose(arg));
   command('clearComments', () => comments.clear());
   for (const [name, contextValue] of [
     ['clearCommitComments', 'commentCommitGroup'],

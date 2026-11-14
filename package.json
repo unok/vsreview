@@ -132,6 +132,11 @@
         "icon": "$(check)"
       },
       {
+        "command": "vsreview.togglePurpose",
+        "title": "VSReview: コメントの種別を切り替え",
+        "icon": "$(arrow-swap)"
+      },
+      {
         "command": "vsreview.clearComments",
         "title": "VSReview: コメントを全削除",
         "icon": "$(clear-all)"
@@ -262,6 +267,10 @@
           "when": "view == vsreview.comments && viewItem == comment"
         },
         {
+          "command": "vsreview.togglePurpose",
+          "when": "view == vsreview.comments && viewItem == comment"
+        },
+        {
           "command": "vsreview.openPullRequest",
           "when": "view == vsreview.pullRequests && viewItem == pullRequest"
         },
@@ -347,6 +356,11 @@
           "when": "commentController == vsreview && commentThread == vsreview.savedThread"
         },
         {
+          "command": "vsreview.togglePurpose",
+          "group": "navigation",
+          "when": "commentController == vsreview && commentThread == vsreview.savedThread"
+        },
+        {
           "command": "vsreview.deleteComment",
           "group": "navigation",
           "when": "commentController == vsreview && commentThread == vsreview.savedThread"
@@ -387,6 +401,10 @@
         },
         {
           "command": "vsreview.toggleResolved",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.togglePurpose",
           "when": "false"
         },
         {

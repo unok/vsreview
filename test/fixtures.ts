@@ -40,6 +40,7 @@ export async function repository(): Promise<Awaited<ReturnType<typeof createRepo
   return fixture;
 }
 export const reviewComment: ReviewComment = {
+  purpose: 'fix',
   id: 'one',
   repoRoot: '/repo',
   commit: 'b'.repeat(40),

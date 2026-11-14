@@ -444,6 +444,8 @@ describe('commands', () => {
       expect(comments.all[0]?.body).toBe('saved through command');
       await commands.executeCommand('vsreview.toggleResolved', { kind: 'comment', comment: saved });
       expect(comments.all[0]?.resolved).toBe(true);
+      await commands.executeCommand('vsreview.togglePurpose', { kind: 'comment', comment: saved });
+      expect(comments.all[0]).toMatchObject({ purpose: 'question', resolved: true });
       await commands.executeCommand('vsreview.deleteComment', { kind: 'comment', comment: saved });
       expect(comments.all).toEqual([]);
       input.mockResolvedValueOnce('clear through command');
@@ -1101,6 +1103,34 @@ describe('コメントノードの一括削除コマンド', () => {
     warning.mockResolvedValueOnce('削除');
     await commands.executeCommand('vsreview.clearCommitComments', group);
     expect(api.comments.all.map((c) => c.id)).toEqual(['other-repo', 'pr', 'old-pr', 'other-pr']);
+  });
+
+  it('種別切り替えは保存済みスレッドとコメントノードだけに表示する', async () => {
+    const manifest = JSON.parse(await readFile('package.json', 'utf8')) as {
+      contributes: { commands: unknown[]; menus: Record<string, { command: string }[]> };
+    };
+    const command = 'vsreview.togglePurpose';
+    expect(manifest.contributes.commands).toContainEqual({
+      command,
+      title: 'VSReview: コメントの種別を切り替え',
+      icon: '$(arrow-swap)',
+    });
+    expect(manifest.contributes.menus['comments/commentThread/title']).toContainEqual({
+      command,
+      group: 'navigation',
+      when: 'commentController == vsreview && commentThread == vsreview.savedThread',
+    });
+    expect(manifest.contributes.menus['view/item/context']).toContainEqual({
+      command,
+      when: 'view == vsreview.comments && viewItem == comment',
+    });
+    expect(manifest.contributes.menus.commandPalette).toContainEqual({ command, when: 'false' });
+    expect(
+      Object.entries(manifest.contributes.menus)
+        .filter(([, entries]) => entries.some((entry) => entry.command === command))
+        .map(([name]) => name)
+        .sort(),
+    ).toEqual(['commandPalette', 'comments/commentThread/title', 'view/item/context']);
   });
 
   it('各メニューは対象ノードだけに表示し、パレットには表示しない', async () => {

@@ -1,9 +1,9 @@
-import { selectComments, isCommitComment, type ReviewComment } from '../core/model';
+import { selectComments, isCommitComment, type ReviewComment, type CommentPurpose } from '../core/model';
 import { commitKey, reviewGroupKey } from '../core/comparisons';
 import * as vscode from 'vscode';
 import { groupBy } from '../core/collections';
 import { shortHash, escapeIcons, replaceDisplayControls, UNCOMMITTED_LABEL } from '../core/presentation';
-import { exportMarkdown, exportJson, UNKNOWN_VALUE, type ExportPurpose } from '../core/export';
+import { exportMarkdown, exportJson, UNKNOWN_VALUE } from '../core/export';
 import { isRecord, isPositiveInteger } from '../core/validation';
 import { showError, showStatus } from './common';
 import type { RepositoryAccess } from './repositories';
@@ -11,7 +11,7 @@ export interface ExportRequest {
   scope: 'all' | 'unresolved' | 'pullRequest' | 'uncommitted';
   pullRequest?: number;
   repoRoot?: string;
-  purpose?: ExportPurpose;
+  purpose?: CommentPurpose;
   format: 'markdown' | 'json';
 }
 export function isExportRequest(value: unknown): value is ExportRequest {

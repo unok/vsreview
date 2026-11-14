@@ -24,9 +24,9 @@ Agent が作業する git worktree のフォルダを VS Code で開くと、そ
 
 HEAD と、共通 Git 管理ディレクトリの `refs/heads`・`packed-refs` を監視します。worktree では `.git` ファイルの参照先を Git から取得するため、元リポジトリ側にある参照の変更にも追従します。連続した変更は 300 ms 待ってまとめ、更新中に変更が続いた場合も処理を重ねず完了後に再実行します。設定やリポジトリの選択が変わると監視を張り直します。
 
-行番号付近のコメントボタンから行・範囲コメントを追加します。編集・削除はコメント欄、解決状態の切り替えはスレッドのボタンで操作します。「ファイルにコメントを追加」はファイルノードのメニューと差分のタイトルから入力します。ファイルコメントには範囲がなく、Review Comments にだけ表示します。
+行番号付近のコメントボタンから行・範囲コメントを追加します。編集・削除はコメント欄、解決状態と種別の切り替えは保存済みスレッドのタイトルボタン、または Review Comments のコメントノードの右クリックメニューで操作します。新しいコメントの種別は「修正依頼」です。種別はスレッドのタイトルと Review Comments のコメントノードに表示します。「ファイルにコメントを追加」はファイルノードのメニューと差分のタイトルから入力します。ファイルコメントには範囲がなく、Review Comments にだけ表示します。
 
-Review Comments では、コミットと PR のコメントはコミットまたは PR→ファイル→コメントの階層です。選ぶと該当差分と行を開きます。コメントはワークスペースの `workspaceState` に JSON で保存し、差分を開き直すと復元します。編集中のコメントは差分の左右を行き来しても保持します。
+Review Comments では、コミットと PR のコメントはコミットまたは PR→ファイル→コメントの階層です。選ぶと該当差分と行を開きます。コメントには種別 `purpose`（`fix`: 修正依頼、`question`: 質問）を保存します。種別のない既存データは修正依頼として読み、読み込みだけでは保存し直しません。不正な種別は保存内容を保護するため読み込みを中止します。コメントはワークスペースの `workspaceState` に JSON で保存し、差分を開き直すと復元します。編集中のコメントは差分の左右を行き来しても保持します。
 
 「AI Agent 向けにコメントをエクスポート」で範囲・形式・目的を選ぶと、未保存の文書を開き、同じ内容をクリップボードにコピーします。コミットの修正依頼は次の指示を含みます。
 
@@ -136,6 +136,7 @@ ID はすべて `vsreview.` で始まります。引数が必要な内部操作�
 | `addRangeComment`                                                        | 行・範囲コメントを追加                                                       |
 | `editComment` / `saveComment` / `cancelEdit`                             | コメントの編集・保存・取り消し                                               |
 | `deleteComment` / `toggleResolved`                                       | コメントの削除・解決状態切り替え                                             |
+| `togglePurpose`                                                          | コメントの種別切り替え（修正依頼／質問）                                     |
 | `clearComments`                                                          | 確認後に全コメントを削除                                                     |
 | `clearCommitComments` / `clearPullRequestComments` / `clearFileComments` | 確認後に選択したコミット・PR・ファイルのコメントを削除（右クリックメニュー） |
 | `clearRewrittenComments`                                                 | 確認後に書き換え済みコメントを削除                                           |
@@ -189,7 +190,7 @@ ID はすべて `vsreview.` で始まります。引数が必要な内部操作�
 作成: "2026-11-06T10:00:00Z" / 更新: "2026-11-06T10:00:00Z"
 ````
 
-JSON は `version`、目的 `purpose`、指示文 `instructions`、資料との境界説明 `boundary`、現在ブランチの対応表 `repositories`、アンカーを含む `comments` を出力します。各コメントは `id`、`status`、`subject`、`author`、`date`、`repoRoot`、`commit`、`parent`、`path`、`oldPath`（該当時）、`side`、`startLine`、`endLine`、`code`、`hunkHeader`、`excerpt`、`body`、作成・更新日時、`resolved` を持ちます。PR コメントには省略可能な `pullRequest` フィールド（番号・タイトル・URL・base/head 名・OID・merge-base など）も含みます。未コミットのコメントには `uncommitted`（`kind`、`createdAt`、HEAD があれば `head`）が付きます。未コミットのコメントがあるときだけ最上位に `uncommittedSnapshots` を出し、各要素に `repoRoot`、`snapshot`、`kind`（`staged` / `unstaged`）、`head`（HEAD がなければ `null`）、`createdAt`、`changed`（内容が変更済みかの真偽値）を含めます。保存形式は version 1 のままです。ファイルコメントは `side=file`、行番号は 0 です。ブランチ取得に失敗した場合、本文には「取得不能」だけを書き、詳細は VS Code に通知します。
+JSON は `version`、目的 `purpose`、指示文 `instructions`、資料との境界説明 `boundary`、現在ブランチの対応表 `repositories`、アンカーを含む `comments` を出力します。各コメントは `id`、`status`、`subject`、`author`、`date`、`repoRoot`、`commit`、`parent`、`path`、`oldPath`（該当時）、`side`、`startLine`、`endLine`、`code`、`hunkHeader`、`excerpt`、`body`、作成・更新日時、`resolved`、`purpose`（`fix` / `question`）を持ちます。PR コメントには省略可能な `pullRequest` フィールド（番号・タイトル・URL・base/head 名・OID・merge-base など）も含みます。未コミットのコメントには `uncommitted`（`kind`、`createdAt`、HEAD があれば `head`）が付きます。未コミットのコメントがあるときだけ最上位に `uncommittedSnapshots` を出し、各要素に `repoRoot`、`snapshot`、`kind`（`staged` / `unstaged`）、`head`（HEAD がなければ `null`）、`createdAt`、`changed`（内容が変更済みかの真偽値）を含めます。保存形式は version 1 のままです。ファイルコメントは `side=file`、行番号は 0 です。ブランチ取得に失敗した場合、本文には「取得不能」だけを書き、詳細は VS Code に通知します。
 
 ## 開発
 

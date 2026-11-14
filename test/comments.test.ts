@@ -93,6 +93,7 @@ describe('comments', () => {
     ]);
     for (const c of deserialize(state.value)) {
       expect(c).toMatchObject({
+        purpose: 'fix',
         uncommitted: target.uncommitted,
         subject: '未コミットの変更（未ステージ）',
         author: '',
@@ -102,8 +103,14 @@ describe('comments', () => {
     expect(service.all[0]?.excerpt).toContain('THREE');
     expect(threads.some((t) => t.label?.startsWith('未コミットの変更（未ステージ）'))).toBe(true);
     const first = service.all[0]!;
+    const firstThread = threads.find(
+      (thread) => thread.comments[0] && 'id' in thread.comments[0] && thread.comments[0].id === first.id,
+    )!;
+    expect(firstThread.label).toBe('未コミットの変更（未ステージ） · new L3-L3 · 修正依頼 · 未解決');
     await service.save({ id: first.id, body: 'edited' });
     await service.toggle(first);
+    await service.togglePurpose(first);
+    expect(firstThread.label).toBe('未コミットの変更（未ステージ） · new L3-L3 · 質問 · 解決済み');
     expect(service.all[0]).toMatchObject({ body: 'edited', resolved: true, uncommitted: target.uncommitted });
     await service.delete(first);
     expect(service.all.map((c) => c.side)).toEqual(['old', 'file']);
@@ -155,6 +162,131 @@ describe('comments', () => {
   function reply(doc: vscode.TextDocument, text: string, range = new Range(1, 0, 1, 1)): vscode.CommentReply {
     return { thread: controller.createCommentThread(doc.uri, range as vscode.Range, []), text };
   }
+  it('旧コメントの読み込みだけでは書き込まず、不正な種別は保存せず拒否する', async () => {
+    const legacy = Object.fromEntries(Object.entries(saved).filter(([key]) => key !== 'purpose'));
+    state.value = { version: 1, comments: [legacy, { ...legacy, id: 'second' }] };
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    await service.refresh();
+    expect(service.all).toEqual([
+      { ...legacy, purpose: 'fix' },
+      { ...legacy, id: 'second', purpose: 'fix' },
+    ]);
+    expect(state.writes).toEqual([]);
+    expect(legacy).not.toHaveProperty('purpose');
+    await service.toggle({ id: saved.id });
+    expect(state.value).toEqual({
+      version: 1,
+      comments: [
+        { ...legacy, purpose: 'fix', resolved: true, updatedAt: service.all[0]!.updatedAt },
+        { ...legacy, id: 'second', purpose: 'fix' },
+      ],
+    });
+    const writes = state.writes.length;
+    state.value = { version: 1, comments: [saved, { ...saved, purpose: null }] };
+    expect(() => new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined })).toThrow(
+      '保存されたレビューコメントの形式が不正です',
+    );
+    expect(state.writes).toHaveLength(writes);
+  });
+  it.each(['fix', 'question'] as const)(
+    '種別 %s と解決状態は独立し、切り替え後も対象情報を保持する',
+    async (purpose) => {
+      for (const resolved of [false, true]) {
+        const original = {
+          ...saved,
+          purpose,
+          resolved,
+          pullRequest: { ...pullRequestReview, headRefOid: saved.commit, mergeBase: saved.parent },
+        };
+        state.value = serialize([original]);
+        const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => original.pullRequest });
+        disposeAfter(service);
+        await service.togglePurpose({ kind: 'comment', comment: original });
+        const updated = service.all[0]!;
+        expect(updated).toEqual({
+          ...original,
+          purpose: purpose === 'fix' ? 'question' : 'fix',
+          updatedAt: updated.updatedAt,
+        });
+        expect(Date.parse(updated.updatedAt)).toBeGreaterThan(Date.parse(original.updatedAt));
+        expect(deserialize(state.value)).toEqual(service.all);
+        await service.toggle(updated);
+        expect(service.all[0]).toMatchObject({ purpose: updated.purpose, resolved: !resolved });
+      }
+    },
+  );
+  it('編集中のスレッドから種別を変えても入力を保持し、取り消しは本文だけを戻す', async () => {
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    await service.refresh();
+    await open('old');
+    const thread = threads[0]!;
+    expect(thread.label).toBe(`${shortHash(saved.commit)} · old L2-L2 · 修正依頼 · 未解決`);
+    await service.edit(thread);
+    thread.comments[0]!.body = 'unsaved draft';
+    await service.togglePurpose(thread);
+    expect(thread.comments[0]).toMatchObject({ body: 'unsaved draft', mode: CommentMode.Editing });
+    expect(thread.label).toBe(`${shortHash(saved.commit)} · old L2-L2 · 質問 · 未解決`);
+    expect(thread.state).toBe(CommentThreadState.Unresolved);
+    await service.refresh();
+    expect(thread.comments[0]?.body).toBe('unsaved draft');
+    await service.toggle(thread);
+    expect(thread.label).toBe(`${shortHash(saved.commit)} · old L2-L2 · 質問 · 解決済み`);
+    expect(thread.state).toBe(CommentThreadState.Resolved);
+    service.cancelEdit(thread);
+    expect(thread.comments[0]).toMatchObject({ body: saved.body, mode: CommentMode.Preview });
+    expect(service.all[0]?.purpose).toBe('question');
+    await documentClosed.fireAsync(docs[0]!);
+    await documentOpened.fireAsync(docs[0]!);
+    expect(threads.at(-1)?.label).toContain('質問');
+  });
+  it('保存失敗は種別と表示を保持し、その後の連続切り替えと本文保存を直列化する', async () => {
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    await service.refresh();
+    await open('old');
+    const thread = threads[0]!;
+    const label = thread.label;
+    state.fail = true;
+    await expect(service.togglePurpose(thread)).rejects.toThrow('disk full');
+    expect(service.all[0]).toEqual(saved);
+    expect(thread.label).toBe(label);
+    expect(state.writes).toEqual([]);
+    await Promise.all([
+      service.togglePurpose(saved),
+      service.togglePurpose(saved),
+      service.save({ id: saved.id, body: 'edited' }),
+    ]);
+    expect(service.all[0]).toMatchObject({ purpose: 'fix', body: 'edited' });
+    await Promise.all([service.togglePurpose(saved), service.toggle(saved)]);
+    expect(service.all[0]).toMatchObject({ purpose: 'question', resolved: true, body: 'edited' });
+    const beforeInvalidArguments = structuredClone(service.all);
+    const writes = state.writes.length;
+    for (const value of [undefined, null, {}, { id: 'missing' }, { kind: 'file', comments: [saved] }]) {
+      await service.togglePurpose(value);
+    }
+    expect(state.writes).toHaveLength(writes);
+    expect(service.all).toEqual(beforeInvalidArguments);
+    await Promise.all([service.delete(saved), service.togglePurpose(saved)]);
+    expect(service.all).toEqual([]);
+  });
+  it('新規の行・範囲・ファイルコメントは本文にかかわらず修正依頼とする', async () => {
+    state.value = undefined;
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    await service.refresh();
+    for (const side of ['old', 'new'] as const) {
+      const doc = await open(side);
+      await service.addRangeComment(reply(doc, '理由は何ですか', new Range(0, 0, 0, 1)));
+      await service.addRangeComment(reply(doc, '範囲の質問', new Range(0, 0, 1, 1)));
+    }
+    input.mockResolvedValueOnce('ファイルの質問');
+    await service.addFileComment(target);
+    expect(service.all).toHaveLength(5);
+    expect(service.all.every((c) => c.purpose === 'fix')).toBe(true);
+    expect(deserialize(state.value).every((c) => c.purpose === 'fix')).toBe(true);
+  });
   it('解決待ちの再描画と削除が重なってもスレッドを復活させない', async () => {
     const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
     disposeAfter(service);
@@ -1111,6 +1243,7 @@ describe('comments', () => {
       await service.addRangeComment(reply(doc, 'saved PR comment'));
     }
     const comment = deserialize(state.value).find((value) => value.body === 'saved PR comment')!;
+    expect(comment.purpose).toBe('fix');
     expect({
       pullRequest: comment.pullRequest,
       subject: comment.subject,
