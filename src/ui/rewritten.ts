@@ -11,6 +11,7 @@ import { showError } from './common';
 export type RewrittenTarget = Pick<ReviewComment, 'repoRoot' | 'commit'> & {
   parent?: string;
   pullRequest?: PullRequestComparison;
+  uncommitted?: ReviewComment['uncommitted'];
 };
 export async function rewrittenTargets(
   comments: readonly ReviewComment[],
@@ -45,7 +46,11 @@ export class RewrittenComments implements vscode.Disposable {
     const generation = ++this.generation;
     const targets = await this.targets();
     const keys = new Set<string>();
-    for (const [key, comments] of groupBy(targets, comparisonKey)) {
+    // 未コミットのスナップショットは参照を持たず、HEAD から到達できないため除く。
+    for (const [key, comments] of groupBy(
+      targets.filter((target) => !target.uncommitted),
+      comparisonKey,
+    )) {
       const comment = comments[0];
       if (!comment || !this.access.isKnown(comment.repoRoot)) {
         continue;

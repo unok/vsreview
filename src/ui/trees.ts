@@ -17,10 +17,21 @@ import {
   rewrittenSuffix,
 } from '../core/presentation';
 import type { RewrittenComments } from './rewritten';
+import type { UncommittedChanges, UncommittedChange, UncommittedSnapshot } from '../core/uncommitted';
+import { canonicalCommit, type FileTarget } from '../core/documents';
+import { createUncommittedChanges } from '../git/uncommitted';
+import { UNCOMMITTED_LABEL, UNCOMMITTED_KIND_LABELS, uncommittedLabel } from '../core/presentation';
+import { showError, showStatus } from './common';
 
 export const COMMIT_PAGE_SIZE = 50;
 
-export type CommitNode = { kind: 'commit'; repo: string; commit: Commit } | ChangedFileNode | { kind: 'more' };
+export type CommitNode =
+  | { kind: 'commit'; repo: string; commit: Commit }
+  | ChangedFileNode
+  | { kind: 'more' }
+  | { kind: 'uncommitted'; repo: string; changes: UncommittedChanges }
+  | { kind: 'uncommittedGroup'; repo: string; change: UncommittedChange; uncommitted: UncommittedSnapshot };
+type CaptureUncommitted = (git: GitClient) => Promise<UncommittedChanges>;
 export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.Disposable {
   private readonly treeDataChanged = new vscode.EventEmitter<CommitNode | undefined>();
   readonly onDidChangeTreeData = this.treeDataChanged.event;
@@ -37,10 +48,13 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
   private selected: GitClient | undefined;
   private refreshing = false;
   private revision: string | undefined;
+  private uncommitted: UncommittedChanges | undefined;
   constructor(
     comments: () => readonly ReviewComment[],
     private readonly access: RepositoryAccess,
     private readonly changedFiles: ChangedFiles,
+    private readonly captureUncommitted: CaptureUncommitted = (git) =>
+      createUncommittedChanges(git, new Date().toISOString()),
   ) {
     this.files = new ChangedFileNodes(comments);
   }
@@ -69,7 +83,20 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
       if (generation !== this.refreshGeneration) {
         return;
       }
+      let changes: UncommittedChanges | undefined;
+      try {
+        changes = git ? await this.captureUncommitted(git) : undefined;
+      } catch (error) {
+        // 未コミットの取得失敗で既存のコミット履歴まで隠さない。
+        if (generation === this.refreshGeneration) {
+          showError(error);
+        }
+      }
+      if (generation !== this.refreshGeneration) {
+        return;
+      }
       if (previousRoot === git?.root && revision === this.revision) {
+        this.uncommitted = changes;
         this.rerender();
         return;
       }
@@ -81,6 +108,7 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
         return;
       }
       this.repository = git;
+      this.uncommitted = changes;
       this.revision = revision;
       this.more = commits.length > count;
       this.commits = commits.slice(0, count);
@@ -94,6 +122,48 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
         this.refreshing = false;
       }
     }
+  }
+  async refreshUncommitted(target: FileTarget): Promise<FileTarget | undefined> {
+    if (!target.uncommitted) {
+      return target;
+    }
+    const generation = this.refreshGeneration;
+    let changes: UncommittedChanges;
+    try {
+      changes = await this.captureUncommitted(this.access.client(target.repo));
+    } catch (error) {
+      showError(error);
+      return undefined;
+    }
+    if (
+      target.repo === this.selected?.root &&
+      target.repo === this.git?.root &&
+      generation === this.refreshGeneration
+    ) {
+      this.uncommitted = changes;
+      this.rerender();
+    }
+    const change = changes[target.uncommitted.kind];
+    const file = change.files.find((file) => file.path === target.file.path);
+    if (!file) {
+      showStatus('選択したファイルには未コミットの変更がなくなりました');
+      return undefined;
+    }
+    const uncommitted = this.snapshot(changes, change);
+    return {
+      repo: target.repo,
+      commit: canonicalCommit(change.commit, change.parent, undefined, uncommitted),
+      parent: change.parent,
+      file,
+      uncommitted,
+    };
+  }
+  private snapshot(changes: UncommittedChanges, change: UncommittedChange): UncommittedSnapshot {
+    return {
+      kind: change.kind,
+      ...(changes.head === undefined ? {} : { head: changes.head }),
+      createdAt: changes.createdAt,
+    };
   }
   async loadMore(): Promise<void> {
     const git = this.git;
@@ -118,6 +188,15 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
     }
   }
   getTreeItem(node: CommitNode): vscode.TreeItem {
+    if (node.kind === 'uncommitted' || node.kind === 'uncommittedGroup') {
+      const item = new vscode.TreeItem(
+        node.kind === 'uncommitted' ? UNCOMMITTED_LABEL : UNCOMMITTED_KIND_LABELS[node.change.kind],
+        vscode.TreeItemCollapsibleState.Expanded,
+      );
+      item.id = JSON.stringify([node.repo, node.kind, node.kind === 'uncommittedGroup' ? node.change.kind : undefined]);
+      item.contextValue = node.kind;
+      return item;
+    }
     if (node.kind === 'more') {
       const item = new vscode.TreeItem('さらに読み込む');
       item.command = { command: 'vsreview.loadMore', title: 'さらに読み込む' };
@@ -142,15 +221,43 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
       const git = this.git;
       return git
         ? [
+            ...(this.uncommitted && (this.uncommitted.staged.files.length || this.uncommitted.unstaged.files.length)
+              ? [{ kind: 'uncommitted' as const, repo: git.root, changes: this.uncommitted }]
+              : []),
             ...this.commits.map((commit) => ({ kind: 'commit' as const, repo: git.root, commit })),
             ...(this.more ? [{ kind: 'more' as const }] : []),
           ]
         : [];
     }
+    if (node.kind === 'uncommitted') {
+      return node.repo === this.git?.root && node.changes === this.uncommitted
+        ? [node.changes.staged, node.changes.unstaged]
+            .filter((change) => change.files.length)
+            .map((change) => ({
+              kind: 'uncommittedGroup',
+              repo: node.repo,
+              change,
+              uncommitted: this.snapshot(node.changes, change),
+            }))
+        : [];
+    }
+    if (node.kind === 'uncommittedGroup') {
+      if (node.repo !== this.git?.root || this.uncommitted?.[node.change.kind] !== node.change) {
+        return [];
+      }
+      return this.files.fileNodes(displayedFileTree(node.change.files, node.repo), {
+        repo: node.repo,
+        parent: node.change.parent,
+        uncommitted: node.uncommitted,
+        commit: canonicalCommit(node.change.commit, node.change.parent, undefined, node.uncommitted),
+      });
+    }
     if (
       (node.kind !== 'commit' && node.kind !== 'folder') ||
       node.repo !== this.git?.root ||
-      !this.commits.some((c) => c.hash === node.commit.hash)
+      !(node.kind === 'folder' && node.uncommitted
+        ? this.uncommitted?.[node.uncommitted.kind].commit.hash === node.commit.hash
+        : this.commits.some((c) => c.hash === node.commit.hash))
     ) {
       return [];
     }
@@ -222,7 +329,9 @@ export class CommentsTree implements vscode.TreeDataProvider<CommentNode>, vscod
           label: first
             ? first.pullRequest
               ? `${basename(first.repoRoot)} · PR #${first.pullRequest.number} ${replaceDisplayControls(first.pullRequest.title)}`
-              : `${basename(first.repoRoot)} · ${shortHash(first.commit)} ${first.subject}`
+              : first.uncommitted
+                ? `${basename(first.repoRoot)} · ${uncommittedLabel(first.uncommitted.kind)} · ${relativeDate(first.uncommitted.createdAt)}`
+                : `${basename(first.repoRoot)} · ${shortHash(first.commit)} ${first.subject}`
             : '',
           comments,
         };

@@ -1,9 +1,12 @@
 import { isPullRequestComparisonFor, pullRequestComparison, type PullRequestComparison } from './pullRequests';
 import { fileSide, type FileSide, isCommit, isChangedFile, type ChangedFile, type Commit } from './gitParsing';
 import type { ReviewComment } from './model';
+import { isUncommittedSnapshot, type UncommittedSnapshot } from './uncommitted';
+import { uncommittedLabel } from './presentation';
 import { isRecord, isRevision, isRepoPath } from './validation';
 export interface CommitTarget {
   pullRequest?: PullRequestComparison;
+  uncommitted?: UncommittedSnapshot;
   repo: string;
   commit: Commit;
   parent: string;
@@ -21,6 +24,8 @@ export function isFileTarget(value: unknown): value is FileTarget {
   return (
     isRecord(value) &&
     isCommit(value.commit) &&
+    (value.uncommitted === undefined ||
+      (value.pullRequest === undefined && isUncommittedSnapshot(value.uncommitted))) &&
     isPullRequestComparisonFor(value.pullRequest, value.commit.hash, value.parent) &&
     typeof value.repo === 'string' &&
     isRevision(value.parent) &&
@@ -48,9 +53,10 @@ export function revisionRef(target: FileTarget, side: FileSide): DocumentRef {
   return {
     repo: target.repo,
     ...(target.pullRequest ? { pullRequest: pullRequestComparison(target.pullRequest) } : {}),
+    ...(target.uncommitted ? { uncommitted: snapshotMetadata(target.uncommitted) } : {}),
     parent: target.parent,
     // ツリーから開く場合と保存コメントから復元する場合で同じ URI を生成するため、表示に不要な本文・親一覧を正規化する。
-    commit: canonicalCommit(target.commit, target.parent, target.pullRequest?.number),
+    commit: canonicalCommit(target.commit, target.parent, target.pullRequest?.number, target.uncommitted),
     file: {
       status: target.file.status,
       path: target.file.path,
@@ -66,11 +72,13 @@ export function targetFromComment(comment: ReviewComment): FileTarget {
   return {
     repo: comment.repoRoot,
     ...(comment.pullRequest ? { pullRequest: pullRequestComparison(comment.pullRequest) } : {}),
+    ...(comment.uncommitted ? { uncommitted: snapshotMetadata(comment.uncommitted) } : {}),
     parent: comment.parent,
     commit: canonicalCommit(
       { hash: comment.commit, subject: comment.subject, author: comment.author, date: comment.date },
       comment.parent,
       comment.pullRequest?.number,
+      comment.uncommitted,
     ),
     file: {
       status: comment.status,
@@ -85,14 +93,27 @@ export function canonicalCommit(
   commit: Pick<Commit, 'hash' | 'subject' | 'author' | 'date'>,
   parent: string,
   pullRequestNumber?: number,
+  uncommitted?: UncommittedSnapshot,
 ): Commit {
+  const subject = uncommitted
+    ? uncommittedLabel(uncommitted.kind)
+    : pullRequestNumber
+      ? `PR #${pullRequestNumber}`
+      : commit.subject;
   return {
     hash: commit.hash,
     parents: [parent],
-    subject: pullRequestNumber ? `PR #${pullRequestNumber}` : commit.subject,
-    author: pullRequestNumber ? '' : commit.author,
-    date: pullRequestNumber ? '' : commit.date,
-    message: pullRequestNumber ? `PR #${pullRequestNumber}` : commit.subject,
+    subject,
+    author: uncommitted || pullRequestNumber ? '' : commit.author,
+    date: uncommitted ? uncommitted.createdAt : pullRequestNumber ? '' : commit.date,
+    message: subject,
+  };
+}
+function snapshotMetadata(snapshot: UncommittedSnapshot): UncommittedSnapshot {
+  return {
+    kind: snapshot.kind,
+    ...(snapshot.head === undefined ? {} : { head: snapshot.head }),
+    createdAt: snapshot.createdAt,
   };
 }
 

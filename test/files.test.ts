@@ -64,6 +64,84 @@ function commandCount(processes: ReturnType<typeof gitProcesses>, command: strin
 }
 
 describe('files', () => {
+  it('遅れて解決した未コミット差分は後から表示した通常差分を上書きしない', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a'), 'one');
+    await commitAll(directory, 'base');
+    const commit = (await git.log(0, 1))[0]!;
+    const target = {
+      repo: directory,
+      commit,
+      parent: await git.parent(commit),
+      file: { path: 'a', status: 'A' as const },
+    };
+    const access = await accessFor(directory);
+    const documents = reviewDocuments(access);
+    const tree = filesTree(documents, access);
+    disposeAfter(tree);
+    const uncommitted = {
+      ...target,
+      uncommitted: { kind: 'staged' as const, createdAt: '2026-11-14T00:00:00Z' },
+    };
+    activateTab(new TabInputTextDiff(revisionUri(uncommitted, 'old'), revisionUri(uncommitted, 'new')));
+    const original = documents.openDiffs.bind(documents);
+    let release!: () => void;
+    vi.spyOn(documents, 'openDiffs').mockImplementationOnce(async () => {
+      const diffs = await original();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return diffs;
+    });
+    const pending = tree.synchronize();
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    activateTab(new TabInputTextDiff(revisionUri(target, 'old'), revisionUri(target, 'new')));
+    await tree.synchronize();
+    expect(await tree.getChildren()).toHaveLength(2);
+    expect(tree.view.message).toBe('');
+    release();
+    await pending;
+    expect((await tree.getChildren()).map((node) => tree.getTreeItem(node).label)).toEqual([
+      '変更前（親なし）',
+      `変更後 ${shortHash(commit.hash)}`,
+    ]);
+    expect(tree.view.message).toBe('');
+  });
+  it('同じビューで通常と未コミットを切り替え、差分なしでメッセージを戻す', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a'), 'one');
+    await commitAll(directory, 'base');
+    const commit = (await git.log(0, 1))[0]!;
+    const target = {
+      repo: directory,
+      commit,
+      parent: await git.parent(commit),
+      file: { path: 'a', status: 'A' as const },
+    };
+    const access = await accessFor(directory);
+    const tree = filesTree(reviewDocuments(access), access);
+    disposeAfter(tree);
+    const select = async (uncommitted: boolean) => {
+      const ref = uncommitted
+        ? { ...target, uncommitted: { kind: 'staged' as const, createdAt: '2026-11-14T00:00:00Z' } }
+        : target;
+      activateTab(new TabInputTextDiff(revisionUri(ref, 'old'), revisionUri(ref, 'new')));
+      await tree.synchronize();
+    };
+    await select(false);
+    expect(await tree.getChildren()).toHaveLength(2);
+    await select(true);
+    expect(await tree.getChildren()).toEqual([]);
+    expect(tree.view.message).toBe('未コミットの差分は Files ビューに対応していません');
+    await select(false);
+    expect(await tree.getChildren()).toHaveLength(2);
+    expect(tree.view.message).toBe('');
+    await select(true);
+    window.tabGroups.all = [];
+    window.activeTextEditor = undefined;
+    await tree.synchronize();
+    expect(tree.view.message).toBe('差分を開くと表示します');
+  });
   describe('コミットのファイル', () => {
     it('差分なしは空、深い旧・新パスを表示し、非表示中はrevealせず再表示時に選択する', async () => {
       const provider = new StatusDecorationProvider();
@@ -1018,8 +1096,8 @@ describe('files', () => {
       const { tree, git, access, changedFiles } = await setup();
       const commits = new CommitsTree(() => [], access, changedFiles);
       disposeAfter(commits);
-      const processes = gitProcesses();
       await commits.select(git);
+      const processes = gitProcesses();
       await commits.getChildren((await commits.getChildren())[0]);
       await tree.synchronize();
       expect(await tree.getChildren()).toHaveLength(2);

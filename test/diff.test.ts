@@ -12,12 +12,13 @@ import { targetFromComment } from '../src/core/documents';
 import { ChangedFiles } from '../src/ui/repositories';
 import type * as vscode from 'vscode';
 import { describe, expect, it, vi } from 'vitest';
-import { writeFile, unlink, mkdir } from 'node:fs/promises';
+import { writeFile, unlink, mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runGit } from '../src/git/client';
 import { commitAll, gitAsAuthor } from './gitFixtures';
 import { ReviewDiff } from '../src/ui/diff';
 import { shortHash } from '../src/core/presentation';
+import { createUncommittedChanges } from '../src/git/uncommitted';
 import { revisionUri, RevisionProvider } from '../src/ui/revisions';
 import {
   commands,
@@ -32,6 +33,82 @@ import {
 } from './vscodeMock';
 
 describe('diff', () => {
+  it.each(['rename', 'delete'])('未コミットの%sを旧パスと空の側を保って開く', async (operation) => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'old'), 'original');
+    await commitAll(directory, 'base');
+    if (operation === 'rename') {
+      await rename(join(directory, 'old'), join(directory, 'new'));
+    } else {
+      await unlink(join(directory, 'old'));
+    }
+    const changes = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const target = {
+      repo: directory,
+      ...changes.unstaged,
+      file: changes.unstaged.files[0]!,
+      uncommitted: { kind: 'unstaged' as const, createdAt: changes.createdAt },
+    };
+    const access = await accessFor(directory);
+    disposeAfter(workspace.registerTextDocumentContentProvider('vsreview', new RevisionProvider(access)));
+    const diff = new ReviewDiff(
+      reviewDocuments(access),
+      access,
+      new ChangedFiles(access),
+      { gh: unexpectedGh, remote: () => 'origin' },
+      { review: () => undefined },
+      archiveLease,
+    );
+    await diff.openDiff(target);
+    const call = commands.executeCommand.mock.calls.find(([name]) => name === 'vscode.diff')!;
+    expect((await workspace.openTextDocument(call[1] as vscode.Uri)).getText()).toBe('original');
+    expect((await workspace.openTextDocument(call[2] as vscode.Uri)).getText()).toBe(
+      operation === 'rename' ? 'original' : '',
+    );
+    expect(target.file).toEqual(
+      operation === 'rename' ? { path: 'new', oldPath: 'old', status: 'R' } : { path: 'old', status: 'D' },
+    );
+  });
+  it('初回コミット前と未追跡の左側は空で、移動は同じスナップショットに留まる', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a'), 'staged');
+    await runGit(directory, ['add', 'a']);
+    await writeFile(join(directory, 'b'), 'untracked b');
+    await writeFile(join(directory, 'c'), 'untracked c');
+    const changes = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const access = await accessFor(directory);
+    disposeAfter(workspace.registerTextDocumentContentProvider('vsreview', new RevisionProvider(access)));
+    const diff = new ReviewDiff(
+      reviewDocuments(access),
+      access,
+      new ChangedFiles(access),
+      { gh: unexpectedGh, remote: () => 'origin' },
+      { review: () => undefined },
+      archiveLease,
+    );
+    for (const change of [changes.staged, changes.unstaged]) {
+      const target = {
+        repo: directory,
+        ...change,
+        file: change.files[0]!,
+        uncommitted: { kind: change.kind, createdAt: changes.createdAt },
+      };
+      await diff.openDiff(target);
+      const call = commands.executeCommand.mock.calls.filter(([name]) => name === 'vscode.diff').at(-1)!;
+      expect((await workspace.openTextDocument(call[1] as vscode.Uri)).getText()).toBe('');
+      expect((await workspace.openTextDocument(call[2] as vscode.Uri)).getText()).toBe(
+        change.kind === 'staged' ? 'staged' : 'untracked b',
+      );
+      if (change.kind === 'unstaged') {
+        await writeFile(join(directory, 'c'), 'later');
+        await diff.openAdjacentDiff(1, call[2]);
+        const adjacent = commands.executeCommand.mock.calls.filter(([name]) => name === 'vscode.diff').at(-1)!;
+        expect((await workspace.openTextDocument(adjacent[2] as vscode.Uri)).getText()).toBe('untracked c');
+        await diff.openAdjacentDiff(1, adjacent[2]);
+        expect(window.setStatusBarMessage).toHaveBeenCalledWith('VSReview: この方向にファイルはありません', 5000);
+      }
+    }
+  });
   it('保存 PR コメントから gh を使わずオブジェクトを復元して差分を開く', async () => {
     const { git, directory, saved } = await pullRequestRepository();
     const access = await accessFor(directory, () => git);

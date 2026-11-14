@@ -338,7 +338,7 @@ describe('extension', () => {
           rev === target.commit.hash ? Promise.resolve([]) : log(skip, count, rev),
         );
       await api.commitsTree.reload();
-      expect(getLog).not.toHaveBeenCalled();
+      expect(getLog.mock.calls.filter(([, , rev]) => rev === target.commit.hash)).toEqual([]);
       expect(await api.filesTree.getChildren()).toHaveLength(2);
       await writeFile(join(directory, 'file'), 'two');
       await commitAll(directory, 'two');
@@ -424,7 +424,7 @@ describe('extension', () => {
           docs.splice(stale, 1);
         }
         await api.commitsTree.reload();
-        const commit = (await api.commitsTree.getChildren())[0]!;
+        const commit = (await api.commitsTree.getChildren()).find((node) => node.kind === 'commit')!;
         const file = (await api.commitsTree.getChildren(commit))[0]!;
         await commands.executeCommand('vsreview.openDiff', file);
         const tab = window.tabGroups.activeTabGroup.activeTab!.input;

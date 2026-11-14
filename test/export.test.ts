@@ -16,8 +16,22 @@ import {
   QUESTION_EXPORT_BOUNDARY,
 } from '../src/core/export';
 import { selectComments } from '../src/core/model';
+import { targetFromComment } from '../src/core/documents';
 
 describe('export', () => {
+  it('未コミットのコメントもMarkdownとJSONで出力でき、ラベルとメタデータを保持する', async () => {
+    const { directory } = await repository();
+    const uncommitted = { kind: 'unstaged' as const, createdAt: '2026-11-14T00:00:00Z' };
+    const saved = { ...reviewComment, repoRoot: directory, uncommitted };
+    const commit = targetFromComment(saved).commit;
+    const comment = { ...saved, subject: commit.subject, author: commit.author, date: commit.date };
+    const access = await accessFor(directory);
+    await exportComments([comment], access, { request: { scope: 'all', format: 'markdown' } });
+    expect(docs.at(-1)!.getText()).toContain('件名: "未コミットの変更（未ステージ）"');
+    await exportComments([comment], access, { request: { scope: 'all', format: 'json' } });
+    const exported: unknown = JSON.parse(docs.at(-1)!.getText());
+    expect(exported).toMatchObject({ comments: [{ uncommitted, author: '', date: uncommitted.createdAt }] });
+  });
   describe('コミットのエクスポート', () => {
     async function fixture() {
       const { directory } = await repository();

@@ -40,6 +40,7 @@ interface FileRoot {
 }
 export type FileNode = FileRoot | (TreeEntry & { root: FileRoot; parent: FileNode });
 const NO_DIFF = '差分を開くと表示します';
+const UNCOMMITTED_UNSUPPORTED = '未コミットの差分は Files ビューに対応していません';
 
 export class FilesTree implements vscode.TreeDataProvider<FileNode>, vscode.Disposable {
   private readonly treeDataChanged = new vscode.EventEmitter<FileNode | undefined>();
@@ -180,7 +181,16 @@ export class FilesTree implements vscode.TreeDataProvider<FileNode>, vscode.Disp
     }
     const openDiffs = diffs ?? (await this.documents.openDiffs());
     const ref = await this.selectRef(openDiffs);
+    if (this.disposed || generation !== this.generation || !this.view.visible) {
+      return;
+    }
     this.selectedFile = ref;
+    if (ref?.uncommitted) {
+      this.active = undefined;
+      this.setCurrent(undefined);
+      this.view.message = UNCOMMITTED_UNSUPPORTED;
+      return;
+    }
     if (!ref) {
       this.active = undefined;
       this.setCurrent(undefined);
@@ -269,12 +279,13 @@ export class FilesTree implements vscode.TreeDataProvider<FileNode>, vscode.Disp
     }
   }
   private setCurrent(snapshot: FileSnapshot | undefined): void {
+    // current が空のままでも、未コミット用のメッセージを差分なしの表示へ戻す。
+    this.view.message = snapshot ? '' : NO_DIFF;
     if (this.current === snapshot) {
       return;
     }
     this.current = snapshot;
     this.revealed = undefined;
-    this.view.message = snapshot ? '' : NO_DIFF;
     this.treeDataChanged.fire(undefined);
   }
   getParent(node: FileNode): FileNode | undefined {

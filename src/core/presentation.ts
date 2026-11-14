@@ -1,4 +1,10 @@
 import type { ReviewComment } from './model';
+import type { UncommittedKind } from './uncommitted';
+export const UNCOMMITTED_LABEL = '未コミットの変更';
+export const UNCOMMITTED_KIND_LABELS = { staged: 'ステージ済み', unstaged: '未ステージ' };
+export function uncommittedLabel(kind: UncommittedKind): string {
+  return `${UNCOMMITTED_LABEL}（${UNCOMMITTED_KIND_LABELS[kind]}）`;
+}
 const SHORT_HASH_LENGTH = 8;
 const MILLISECONDS_PER_SECOND = 1000;
 const SECONDS_PER_MINUTE = 60;
