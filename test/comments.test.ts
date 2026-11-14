@@ -46,10 +46,73 @@ import { shortHash } from '../src/core/presentation';
 import { ReviewComments } from '../src/ui/comments';
 import { revisionUri, RevisionProvider } from '../src/ui/revisions';
 import { serialize, deserialize, type ReviewComment } from '../src/core/model';
+import { createUncommittedChanges } from '../src/git/uncommitted';
 
 // 再登録の有無を使う既存ケースは、モックが持たない VS Code 所有の入力欄の再生成を検出するため。
 // 実際の未保存本文とフォーカスの保持は E2E で検証し、競合ケースは再問い合わせを入口で観測する。
 describe('comments', () => {
+  it('未コミットの左右の範囲とファイルコメントを保存し、編集・解決・削除でも対象を保持する', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a'), 'one\ntwo\nthree\n');
+    await commitAll(directory, 'base');
+    await writeFile(join(directory, 'a'), 'ONE\ntwo\nTHREE\n');
+    const changes = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const target = {
+      repo: directory,
+      ...changes.unstaged,
+      file: changes.unstaged.files[0]!,
+      uncommitted: {
+        kind: 'unstaged' as const,
+        ...(changes.head ? { head: changes.head } : {}),
+        createdAt: changes.createdAt,
+      },
+    };
+    const access = await accessFor(directory);
+    const state = new MemoryState();
+    const service = new ReviewComments(state, () => {}, reviewDocuments(access), access, { review: () => undefined });
+    disposeAfter(service);
+    const provider = new RevisionProvider(access);
+    for (const [side, range] of [
+      ['new', new Range(2, 0, 2, 5)],
+      ['old', new Range(0, 0, 1, 3)],
+    ] as const) {
+      const uri = revisionUri(target, side);
+      const doc = textDocument(uri, await provider.provideTextDocumentContent(uri));
+      docs.push(doc);
+      await service.addRangeComment({
+        thread: controller.createCommentThread(uri, range as vscode.Range, []),
+        text: side,
+      });
+    }
+    input.mockResolvedValueOnce('file');
+    await service.addFileComment(target);
+    expect(service.all.map((c) => [c.side, c.startLine, c.endLine])).toEqual([
+      ['new', 3, 3],
+      ['old', 1, 2],
+      ['file', 0, 0],
+    ]);
+    for (const c of deserialize(state.value)) {
+      expect(c).toMatchObject({
+        uncommitted: target.uncommitted,
+        subject: '未コミットの変更（未ステージ）',
+        author: '',
+        date: changes.createdAt,
+      });
+    }
+    expect(service.all[0]?.excerpt).toContain('THREE');
+    expect(threads.some((t) => t.label?.startsWith('未コミットの変更（未ステージ）'))).toBe(true);
+    const first = service.all[0]!;
+    await service.save({ id: first.id, body: 'edited' });
+    await service.toggle(first);
+    expect(service.all[0]).toMatchObject({ body: 'edited', resolved: true, uncommitted: target.uncommitted });
+    await service.delete(first);
+    expect(service.all.map((c) => c.side)).toEqual(['old', 'file']);
+    for (const body of [undefined, '   ']) {
+      input.mockResolvedValueOnce(body);
+      await service.addFileComment(target);
+    }
+    expect(service.all).toHaveLength(2);
+  });
   let target: FileTarget;
   let documents: ReviewDocuments;
   let access: RepositoryAccess;
@@ -686,6 +749,39 @@ describe('comments', () => {
     await service.clearRewritten((c) => c.commit === saved.commit);
     expect(service.all).toEqual([]);
     expect(state.writes).toHaveLength(1);
+  });
+  it.each([false, true])('書き換え済みの種類別件数を示し、確定した対象だけ削除する: PR=%s', async (withPr) => {
+    const uncommitted = { ...saved, uncommitted: { kind: 'unstaged' as const, createdAt: saved.createdAt } };
+    const values = [
+      saved,
+      { ...uncommitted, id: 'u1' },
+      { ...uncommitted, id: 'u2' },
+      { ...uncommitted, id: 'unchanged' },
+      { ...saved, id: 'ordinary' },
+      ...(withPr
+        ? [
+            {
+              ...saved,
+              id: 'pr',
+              commit: pullRequestReview.headRefOid,
+              parent: pullRequestReview.mergeBase,
+              pullRequest: pullRequestReview,
+            },
+          ]
+        : []),
+    ];
+    state.value = serialize(values);
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    warning.mockResolvedValueOnce('削除');
+    await service.clearRewritten((c) => !['unchanged', 'ordinary'].includes(c.id));
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      `VSReview: 書き換え済みコミットのコメント 1 件、${withPr ? '書き換え済み PR のコメント 1 件、' : ''}内容が変更済みの未コミットのコメント 2 件を削除しますか？`,
+      { modal: true },
+      '削除',
+    );
+    expect(service.all.map((c) => c.id)).toEqual(['unchanged', 'ordinary']);
+    expect(deserialize(state.value).map((c) => c.id)).toEqual(['unchanged', 'ordinary']);
   });
   it('文書を閉じるとスレッドを破棄し、再度開くと保存済み本文を復元する', async () => {
     const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });

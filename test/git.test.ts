@@ -21,6 +21,87 @@ import { pullRequestRepository, repository, temporaryDirectory, gitProcesses } f
 import { commitAll, gitAsAuthor } from './gitFixtures';
 
 describe('git', () => {
+  it.each([128, 129])(
+    '直下の無視候補の引数が12KiBを超えたら検索範囲を省き、追跡照会は一度にする: %s',
+    async (count) => {
+      const { directory, git } = await repository();
+      await writeFile(join(directory, '.gitignore'), '*.log\n');
+      const candidates = Array.from({ length: count }, (_, i) => `${String(i).padStart(3, '0')}${'é'.repeat(44)}.log`);
+      await writeFile(join(directory, candidates[0]!), 'tracked');
+      await runGit(directory, ['add', '-f', candidates[0]!]);
+      const processes = gitProcesses();
+      expect(await git.ignoredPaths(candidates)).toEqual(new Set(candidates.slice(1)));
+      const calls = processes.mock.calls.filter(([, args]) => args?.includes('ls-files'));
+      expect(calls).toHaveLength(1);
+      const args = calls[0]![1]!;
+      expect(args.slice(args.indexOf('--exclude-standard') + 1)).toEqual(count === 128 ? ['--', ...candidates] : []);
+    },
+  );
+  it('無視候補の先頭要素だけを重複なく追跡照会し、特殊文字もそのまま扱う', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, '.gitignore'), 'dist/\nnode_modules/\n*.log\n-out/\n日本 語/\n');
+    await mkdir(join(directory, 'dist'));
+    await writeFile(join(directory, 'dist/keep'), 'tracked');
+    await runGit(directory, ['add', '-f', 'dist/keep']);
+    const candidates = ['dist/a', 'dist/b', 'node_modules/x', '*.log', '-out/x', '日本 語/x'];
+    const processes = gitProcesses();
+    expect(await git.ignoredPaths([...candidates, 'dist/keep'])).toEqual(new Set(candidates));
+    const calls = processes.mock.calls.filter(([, args]) => args?.includes('ls-files'));
+    expect(calls).toHaveLength(1);
+    const args = calls[0]![1]!;
+    expect(args.slice(args.indexOf('--') + 1)).toEqual(['dist', 'node_modules', '*.log', '-out', '日本 語']);
+  });
+  it.each([
+    ['build', 'build', 'build/keep'],
+    ['dist/', 'dist/out.js', 'dist/out.js'],
+  ])('追跡済みの親と無視ディレクトリ配下を除外しない: %s', async (rule, candidate, file) => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, '.gitignore'), `${rule}\n`);
+    await mkdir(join(directory, file.split('/')[0]!));
+    await writeFile(join(directory, file), 'tracked');
+    await runGit(directory, ['add', '-f', file]);
+    expect(await git.ignoredPaths([candidate])).toEqual(new Set());
+  });
+  it('大量の無視候補も追跡照会は一度だけで、追跡照会の失敗を伝える', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, '.gitignore'), 'dist/\n');
+    const candidates = Array.from({ length: 1000 }, (_, i) => `dist/${'x'.repeat(40)}${i}`);
+    const processes = gitProcesses();
+    expect(await git.ignoredPaths(candidates)).toEqual(new Set(candidates));
+    expect(processes.mock.calls.filter(([, args]) => args?.includes('ls-files'))).toHaveLength(1);
+    const command = join(await temporaryDirectory(), 'failed-tracking');
+    await writeFile(
+      command,
+      '#!/bin/sh\ncase " $* " in *" check-ignore "*) printf "dist/x\\0";; *) echo "tracking failed" >&2; exit 1;; esac\n',
+    );
+    await chmod(command, 0o755);
+    vi.spyOn(executable, 'gitExecutable').mockReturnValue(command);
+    await expect(git.ignoredPaths(['dist/x'])).rejects.toMatchObject({
+      exitCode: 1,
+    });
+  });
+  it('無視判定は空入力・追跡済み・特殊な名前を扱い、indexを変更しない', async () => {
+    const { directory, git } = await repository();
+    expect(await new GitClient('/not/a/repository').ignoredPaths([])).toEqual(new Set());
+    expect(await git.ignoredPaths(['absent'])).toEqual(new Set());
+    await writeFile(join(directory, '.gitignore'), 'node_modules/\n*.log\n');
+    await writeFile(join(directory, 't.log'), 'tracked');
+    await runGit(directory, ['add', '-f', 't.log']);
+    const { gitDir } = await git.directories();
+    const index = await readFile(join(gitDir, 'index'));
+    const special = ['日本 語.log', 'line\nbreak.log', '-option.log', '*.log'];
+    expect(await git.ignoredPaths(['node_modules/x.js', 't.log', 'a.ts', ...special])).toEqual(
+      new Set(['node_modules/x.js', ...special]),
+    );
+    expect(await readFile(join(gitDir, 'index'))).toEqual(index);
+    await expect(new GitClient(await temporaryDirectory()).ignoredPaths(['a'])).rejects.toBeInstanceOf(GitError);
+  });
+  it('無視規則のないサブモジュール内のパスは除外しない', async () => {
+    const { directory, git } = await repository();
+    const hash = (await runGit(directory, ['hash-object', '-w', '--stdin'], 'submodule')).toString().trim();
+    await runGit(directory, ['update-index', '--add', '--cacheinfo', `160000,${hash},sub`]);
+    expect(await git.ignoredPaths(['sub/file'])).toEqual(new Set());
+  });
   describe('Git の基本操作', () => {
     let directory: string;
     let git: GitClient;

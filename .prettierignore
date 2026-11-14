@@ -3,3 +3,6 @@ dist/
 .scratch/
 *.vsix
 coverage/
+.takt/.runtime/
+.takt/runs/
+.takt/quality-gates/

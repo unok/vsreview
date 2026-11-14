@@ -24,6 +24,7 @@ import { registerNavigation } from './ui/navigation';
 import { AutoRefresh } from './ui/autoRefresh';
 import { showError } from './ui/common';
 export interface ReviewApi {
+  commentsTree: CommentsTree;
   commitsTree: CommitsTree;
   pullRequestsTree: PullRequestsTree;
   comments: ReviewComments;
@@ -175,6 +176,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
   void updateRepository(app, { select: true, discover: false }).then(synchronizeEditors).catch(showError);
   void synchronizeEditors();
   return {
+    commentsTree,
     commitsTree,
     pullRequestsTree,
     comments,

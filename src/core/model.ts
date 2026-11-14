@@ -2,8 +2,10 @@ import { comparisonKey } from './comparisons';
 import { isPullRequestReview, isPullRequestComparisonFor, type PullRequestReview } from './pullRequests';
 import { hasStrings, isRecord, isRevision, isRepoPath, isOptionalRepoPath } from './validation';
 import { isStatus, type Status } from './gitParsing';
+import { isUncommittedSnapshot, type UncommittedSnapshot } from './uncommitted';
 export interface ReviewComment {
   pullRequest?: PullRequestReview;
+  uncommitted?: UncommittedSnapshot;
   id: string;
   repoRoot: string;
   commit: string;
@@ -24,6 +26,9 @@ export interface ReviewComment {
   subject: string;
   author: string;
   date: string;
+}
+export function isCommitComment(comment: Pick<ReviewComment, 'pullRequest' | 'uncommitted'>): boolean {
+  return !comment.pullRequest && !comment.uncommitted;
 }
 interface SavedComments {
   version: 1;
@@ -68,6 +73,8 @@ export function isReviewComment(value: unknown): value is ReviewComment {
   const validSide = value.side === 'old' || value.side === 'new' || value.side === 'file';
   return (
     hasStrings(value, strings) &&
+    (value.uncommitted === undefined ||
+      (value.pullRequest === undefined && isUncommittedSnapshot(value.uncommitted))) &&
     (value.pullRequest === undefined || isPullRequestReview(value.pullRequest)) &&
     isPullRequestComparisonFor(value.pullRequest, value.commit, value.parent) &&
     isOptionalRepoPath(value.oldPath) &&

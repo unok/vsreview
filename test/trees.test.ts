@@ -7,7 +7,7 @@ import { RewrittenComments } from '../src/ui/rewritten';
 import { relativeDate } from '../src/core/presentation';
 import { describe, it, expect, vi } from 'vitest';
 import { writeFile, mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   waitFor,
   repository,
@@ -19,8 +19,382 @@ import {
   workspaceFolder,
 } from './fixtures';
 import { commitAll, gitAsAuthor } from './gitFixtures';
+import { createUncommittedChanges } from '../src/git/uncommitted';
+import type { UncommittedChanges } from '../src/core/uncommitted';
 
 describe('trees', () => {
+  it.each([false, true])('reload待機中の新しいスナップショットを保つ: 履歴変更=%s', async (historyChanged) => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a'), 'base');
+    await commitAll(directory, 'base');
+    await writeFile(join(directory, 'a'), 'first');
+    const access = await accessFor(directory);
+    const capture = vi.fn((client: GitClient) => createUncommittedChanges(client, '2026-11-14T00:00:00Z'));
+    const tree = new CommitsTree(() => [], access, new ChangedFiles(access), capture);
+    disposeAfter(tree);
+    await tree.select(git);
+    const root = (await tree.getChildren())[0]!;
+    const target = (await tree.getChildren((await tree.getChildren(root))[0]))[0]!;
+    if (root.kind !== 'uncommitted' || target.kind !== 'file') {
+      throw new Error('uncommitted file expected');
+    }
+    if (historyChanged) {
+      await gitAsAuthor(directory, ['commit', '--allow-empty', '-m', 'new head']);
+    }
+    const history = vi.fn();
+    tree.onDidChangeHistory(history);
+    let release!: (changes: UncommittedChanges) => void;
+    capture.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const pending = tree.reload({ onlyIfChanged: !historyChanged });
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    await writeFile(join(directory, 'a'), 'latest');
+    const latest = await tree.refreshUncommitted(target);
+    expect(latest?.commit.hash).not.toBe(root.changes.unstaged.commit.hash);
+    release(root.changes);
+    await pending;
+    expect((await tree.getChildren())[0]).toMatchObject({
+      kind: 'uncommitted',
+      changes: { unstaged: { commit: { hash: latest?.commit.hash } } },
+    });
+    expect(history).toHaveBeenCalledTimes(historyChanged ? 1 : 0);
+    if (historyChanged) {
+      expect((await tree.getChildren())[1]).toMatchObject({ commit: { subject: 'new head', hash: await git.head() } });
+      await tree.reload({ onlyIfChanged: true });
+      expect(history).toHaveBeenCalledTimes(1);
+    }
+  });
+  it('未コミットを区分・SHA・ファイルでまとめ、日時・変更済み・抜粋とメニューを表示する', async () => {
+    const { directory, git } = await repository();
+    const current = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const t1 = new Date(2026, 0, 2, 3, 4, 5);
+    const t2 = new Date(t1.getTime() + 500);
+    const staged = {
+      ...reviewComment,
+      repoRoot: directory,
+      uncommitted: { kind: 'staged' as const, createdAt: t2.toISOString() },
+    };
+    const unchanged = {
+      ...staged,
+      id: 'unchanged',
+      commit: current.unstaged.commit.hash,
+      uncommitted: { kind: 'unstaged' as const, createdAt: t1.toISOString() },
+    };
+    const changed = { ...unchanged, id: 'changed', commit: 'c'.repeat(40), excerpt: '' };
+    const comments = [
+      staged,
+      unchanged,
+      { ...staged, id: 'b', path: 'b.ts', uncommitted: { ...staged.uncommitted, createdAt: t1.toISOString() } },
+      changed,
+      { ...reviewComment, id: 'ordinary', repoRoot: directory },
+    ];
+    const rewritten = new RewrittenComments(
+      () => Promise.resolve(comments),
+      await accessFor(directory),
+      { latestHead: () => undefined },
+      () => Promise.resolve(current),
+    );
+    disposeAfter(rewritten);
+    const tree = new CommentsTree(() => comments, rewritten);
+    disposeAfter(tree);
+    await rewritten.refresh();
+    const groups = tree.getChildren();
+    expect(groups.map((node) => tree.getTreeItem(node).label)).toEqual([
+      `${basename(directory)} · 未コミットの変更（ステージ済み）`,
+      `${basename(directory)} · 未コミットの変更（未ステージ）`,
+      `${basename(directory)} · bbbbbbbb subject`,
+    ]);
+    expect(tree.getTreeItem(groups[0]!).contextValue).toBe('commentUncommittedGroup');
+    expect(tree.getTreeItem(groups[0]!).description).toBe('2 コメント · 内容が変更済み');
+    const snapshot = tree.getChildren(groups[0])[0]!;
+    expect(tree.getTreeItem(snapshot)).toMatchObject({
+      label: `${t1.getFullYear()}-01-02 03:04:05`,
+      description: 'bbbbbbbb · 2 コメント · 内容が変更済み',
+      tooltip: staged.commit,
+      contextValue: 'commentUncommittedSnapshot',
+    });
+    const files = tree.getChildren(snapshot);
+    expect(files.map((node) => tree.getTreeItem(node).label)).toEqual([reviewComment.path, 'b.ts']);
+    expect(tree.getTreeItem(files[0]!).contextValue).toBe('commentFile');
+    const leaf = tree.getChildren(files[0])[0]!;
+    expect(tree.getTreeItem(leaf)).toMatchObject({
+      description: 'new L3-L4 · 内容が変更済み',
+      tooltip: `${staged.body}\n\n${staged.excerpt}`,
+      command: { command: 'vsreview.openComment', arguments: [staged] },
+    });
+    const unstaged = tree.getChildren(groups[1]);
+    expect(unstaged).toHaveLength(2);
+    expect(tree.getTreeItem(unstaged[0]!).label).toBe(tree.getTreeItem(unstaged[1]!).label);
+    expect(tree.getTreeItem(unstaged[0]!).description).toBe(`${unchanged.commit.slice(0, 8)} · 1 コメント`);
+    expect(tree.getTreeItem(unstaged[1]!).description).toBe('cccccccc · 1 コメント · 内容が変更済み');
+    const changedLeaf = tree.getChildren(tree.getChildren(unstaged[1])[0])[0]!;
+    expect(tree.getTreeItem(changedLeaf).tooltip).toBe(`${changed.body}\n\n${changed.hunkHeader}\n${changed.code}`);
+    expect(tree.getTreeItem({ kind: 'comment', comment: { ...changed, side: 'file' } }).tooltip).toBe(changed.body);
+    expect(tree.getTreeItem({ kind: 'comment', comment: reviewComment }).tooltip).toBe(reviewComment.body);
+  });
+  it('不正な日時を除いて最古の日時を使い、有効な日時がなければ日時不明にする', async () => {
+    const { directory } = await repository();
+    const first = { ...reviewComment, repoRoot: directory, uncommitted: { kind: 'staged' as const, createdAt: 'bad' } };
+    const comments = [first];
+    const rewritten = new RewrittenComments(() => Promise.resolve([]), await accessFor(directory), {
+      latestHead: () => undefined,
+    });
+    const tree = new CommentsTree(() => comments, rewritten);
+    disposeAfter(rewritten);
+    disposeAfter(tree);
+    const label = () => tree.getTreeItem(tree.getChildren(tree.getChildren()[0])[0]!).label;
+    expect(label()).toBe('日時不明');
+    comments.push({
+      ...first,
+      id: 'valid',
+      uncommitted: { ...first.uncommitted, createdAt: new Date(2026, 0, 2, 3, 4, 5).toISOString() },
+    });
+    expect(label()).toBe('2026-01-02 03:04:05');
+  });
+  it('未コミットを先頭で区分し、空グループ・ignoreを除き表示設定と件数を共有する', async () => {
+    const { directory, git } = await repository();
+    await mkdir(join(directory, 'src/ui'), { recursive: true });
+    await writeFile(join(directory, '.gitignore'), 'dist/\n');
+    for (const name of ['a', 'b']) {
+      await writeFile(join(directory, `src/ui/${name}.ts`), name);
+    }
+    await commitAll(directory, 'base');
+    const access = await accessFor(directory);
+    let comments = [reviewComment];
+    const tree = new CommitsTree(() => comments, access, new ChangedFiles(access));
+    disposeAfter(tree);
+    await tree.select(git);
+    expect((await tree.getChildren()).map((n) => n.kind)).toEqual(['commit']);
+    await writeFile(join(directory, 'src/ui/a.ts'), 'staged');
+    await runGit(directory, ['add', 'src/ui/a.ts']);
+    await writeFile(join(directory, 'src/ui/b.ts'), 'unstaged');
+    await writeFile(join(directory, 'src/ui/c.ts'), 'unique new');
+    await mkdir(join(directory, 'dist'));
+    await writeFile(join(directory, 'dist/out.js'), 'ignored');
+    const history = vi.fn();
+    const changed = vi.fn();
+    tree.onDidChangeHistory(history);
+    tree.onDidChangeTreeData(changed);
+    await tree.reload();
+    const root = (await tree.getChildren())[0]!;
+    expect(tree.getTreeItem(root).label).toBe('未コミットの変更');
+    expect(tree.getTreeItem(root).contextValue).not.toBe('commit');
+    const groups = await tree.getChildren(root);
+    expect(groups.map((n) => tree.getTreeItem(n).label)).toEqual(['ステージ済み', '未ステージ']);
+    const stagedFolders = await tree.getChildren(groups[0]);
+    expect(
+      (await tree.getChildren(stagedFolders[0])).map((n) => n.kind === 'file' && [n.file.path, n.file.status]),
+    ).toEqual([['src/ui/a.ts', 'M']]);
+    const folders = await tree.getChildren(groups[1]);
+    expect(tree.getTreeItem(folders[0]!).label).toBe('src/ui');
+    const files = await tree.getChildren(folders[0]);
+    expect(files.map((n) => n.kind === 'file' && [n.file.path, n.file.status])).toEqual([
+      ['src/ui/b.ts', 'M'],
+      ['src/ui/c.ts', 'A'],
+    ]);
+    const file = files[0]!;
+    if (file.kind !== 'file') {
+      throw new Error('file expected');
+    }
+    comments = [
+      { ...reviewComment, repoRoot: directory, commit: file.commit.hash, parent: file.parent, path: file.file.path },
+    ];
+    expect(tree.getTreeItem(file).description).toBe('1 コメント');
+    expect(tree.getTreeItem(folders[0]!).description).toBe('1 コメント');
+    expect(
+      new StatusDecorationProvider().provideFileDecoration(tree.getTreeItem(files[1]!).resourceUri!),
+    ).toMatchObject({ badge: 'A' });
+    globalConfiguration.set('explorer.compactFolders', false);
+    expect(tree.getTreeItem((await tree.getChildren(groups[1]))[0]!).label).toBe('src');
+    globalConfiguration.set('vsreview.fileView', 'list');
+    expect((await tree.getChildren(groups[1])).map((n) => tree.getTreeItem(n).label)).toEqual([
+      'src/ui/b.ts',
+      'src/ui/c.ts',
+    ]);
+    await runGit(directory, ['add', '-A']);
+    await tree.reload();
+    expect((await tree.getChildren((await tree.getChildren())[0])).map((n) => tree.getTreeItem(n).label)).toEqual([
+      'ステージ済み',
+    ]);
+    expect(history).not.toHaveBeenCalled();
+    expect(changed).toHaveBeenCalledTimes(2);
+  });
+  it('reload前の未コミットroot・group・folderは現在の子を返さない', async () => {
+    const { directory, git } = await repository();
+    await mkdir(join(directory, 'src'));
+    await writeFile(join(directory, 'src/a'), 'first');
+    const access = await accessFor(directory);
+    const tree = new CommitsTree(() => [], access, new ChangedFiles(access));
+    disposeAfter(tree);
+    await tree.select(git);
+    const root = (await tree.getChildren())[0]!;
+    const group = (await tree.getChildren(root))[0]!;
+    const folder = (await tree.getChildren(group))[0]!;
+    expect((await tree.getChildren(folder)).map((node) => tree.getTreeItem(node).label)).toEqual(['a']);
+    await writeFile(join(directory, 'src/a'), 'second');
+    await tree.reload();
+    for (const node of [root, group, folder]) {
+      expect(await tree.getChildren(node)).toEqual([]);
+    }
+    const currentGroup = (await tree.getChildren((await tree.getChildren())[0]))[0]!;
+    const currentFolder = (await tree.getChildren(currentGroup))[0]!;
+    expect((await tree.getChildren(currentFolder)).map((node) => tree.getTreeItem(node).label)).toEqual(['a']);
+  });
+  it('リポジトリ切り替えの待機中に旧リポジトリのファイルを選んでも切り替え先の一覧を表示する', async () => {
+    const first = await repository();
+    const second = await repository();
+    await writeFile(join(first.directory, 'a'), 'first');
+    await writeFile(join(second.directory, 'b'), 'second');
+    const access = await accessFor(first.directory);
+    await access.discover([workspaceFolder(first.directory), workspaceFolder(second.directory, 1)]);
+    const capture = vi.fn((git: GitClient) => createUncommittedChanges(git, '2026-11-14T00:00:00Z'));
+    const tree = new CommitsTree(() => [], access, new ChangedFiles(access), capture);
+    disposeAfter(tree);
+    await tree.select(first.git);
+    const root = (await tree.getChildren())[0]!;
+    const group = (await tree.getChildren(root))[0]!;
+    const target = (await tree.getChildren(group))[0]!;
+    if (root.kind !== 'uncommitted' || target.kind !== 'file') {
+      throw new Error('uncommitted file expected');
+    }
+    const expected = await createUncommittedChanges(second.git, '2026-11-14T00:00:00Z');
+    let release!: (changes: UncommittedChanges) => void;
+    capture.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const pending = tree.select(second.git);
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    const refreshed = await tree.refreshUncommitted(target);
+    release(expected);
+    await pending;
+    expect(refreshed).toMatchObject({ repo: first.directory });
+    expect((await tree.getChildren())[0]).toMatchObject({
+      kind: 'uncommitted',
+      repo: second.directory,
+      changes: { unstaged: { commit: { hash: expected.unstaged.commit.hash } } },
+    });
+  });
+  it.each(['other repository', 'newer reload'])('refreshUncommittedは%sの現在表示を上書きしない', async (scenario) => {
+    const first = await repository();
+    const second = await repository();
+    await writeFile(join(first.directory, 'a'), 'first');
+    await writeFile(join(second.directory, 'b'), 'second');
+    const access = await accessFor(first.directory);
+    await access.discover([workspaceFolder(first.directory), workspaceFolder(second.directory, 1)]);
+    const capture = vi.fn((git: GitClient) => createUncommittedChanges(git, '2026-11-14T00:00:00Z'));
+    const tree = new CommitsTree(() => [], access, new ChangedFiles(access), capture);
+    disposeAfter(tree);
+    await tree.select(first.git);
+    const root = (await tree.getChildren())[0]!;
+    const group = (await tree.getChildren(root))[0]!;
+    const target = (await tree.getChildren(group))[0]!;
+    if (root.kind !== 'uncommitted' || target.kind !== 'file') {
+      throw new Error('uncommitted file expected');
+    }
+    let expectedRepo = first.directory;
+    let expectedHash: string;
+    if (scenario === 'other repository') {
+      await tree.select(second.git);
+      const current = (await tree.getChildren())[0]!;
+      if (current.kind !== 'uncommitted') {
+        throw new Error('uncommitted expected');
+      }
+      expectedRepo = second.directory;
+      expectedHash = current.changes.unstaged.commit.hash;
+      expect(await tree.refreshUncommitted(target)).toMatchObject({ repo: first.directory });
+    } else {
+      let release!: (changes: UncommittedChanges) => void;
+      capture.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      );
+      const pending = tree.refreshUncommitted(target);
+      await waitFor(() => expect(release).toBeTypeOf('function'));
+      await writeFile(join(first.directory, 'a'), 'latest');
+      await tree.reload();
+      const current = (await tree.getChildren())[0]!;
+      if (current.kind !== 'uncommitted') {
+        throw new Error('uncommitted expected');
+      }
+      expectedHash = current.changes.unstaged.commit.hash;
+      expect(expectedHash).not.toBe(root.changes.unstaged.commit.hash);
+      release(root.changes);
+      expect(await pending).toMatchObject({ repo: first.directory });
+    }
+    const current = (await tree.getChildren())[0]!;
+    expect(current).toMatchObject({
+      kind: 'uncommitted',
+      repo: expectedRepo,
+      changes: { unstaged: { commit: { hash: expectedHash } } },
+    });
+  });
+  it('初回コミット前にも未追跡とステージ済みを表示する', async () => {
+    const { directory, git } = await repository();
+    const access = await accessFor(directory);
+    const tree = new CommitsTree(() => [], access, new ChangedFiles(access));
+    disposeAfter(tree);
+    await writeFile(join(directory, 'b'), 'new');
+    await tree.select(git);
+    expect((await tree.getChildren((await tree.getChildren())[0])).map((n) => tree.getTreeItem(n).label)).toEqual([
+      '未ステージ',
+    ]);
+    await writeFile(join(directory, 'a'), 'staged');
+    await runGit(directory, ['add', 'a']);
+    await tree.reload();
+    const roots = await tree.getChildren();
+    expect(roots.map((n) => n.kind)).toEqual(['uncommitted']);
+    expect((await tree.getChildren(roots[0])).map((n) => tree.getTreeItem(n).label)).toEqual([
+      'ステージ済み',
+      '未ステージ',
+    ]);
+  });
+  it('スナップショット失敗を通知し復旧でき、遅い結果は選択解除を上書きしない', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a'), 'base');
+    await commitAll(directory, 'base');
+    await writeFile(join(directory, 'a'), 'changed');
+    const access = await accessFor(directory);
+    const capture = vi.fn((client: GitClient) => createUncommittedChanges(client, '2026-11-14T00:00:00Z'));
+    capture.mockRejectedValueOnce(new Error('snapshot failed'));
+    const tree = new CommitsTree(() => [], access, new ChangedFiles(access), capture);
+    disposeAfter(tree);
+    await tree.select(git);
+    expect(window.showErrorMessage).toHaveBeenCalledWith('VSReview: snapshot failed');
+    expect((await tree.getChildren()).map((n) => n.kind)).toEqual(['commit']);
+    await tree.reload();
+    expect((await tree.getChildren())[0]?.kind).toBe('uncommitted');
+    const group = (await tree.getChildren((await tree.getChildren())[0]))[0]!;
+    const file = (await tree.getChildren(group))[0]!;
+    if (file.kind !== 'file') {
+      throw new Error('file expected');
+    }
+    capture.mockRejectedValueOnce(new Error('selection failed'));
+    expect(await tree.refreshUncommitted(file)).toBeUndefined();
+    expect(window.showErrorMessage).toHaveBeenLastCalledWith('VSReview: selection failed');
+    const changes = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    let release!: (changes: UncommittedChanges) => void;
+    capture.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const pending = tree.reload();
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    await tree.select(undefined);
+    release(changes);
+    await pending;
+    expect(await tree.getChildren()).toEqual([]);
+  });
   it('履歴更新の通知から更新済みのリポジトリとコミットを参照できる', async () => {
     const { directory, git } = await repository();
     await writeFile(join(directory, 'file'), 'one');
@@ -402,7 +776,10 @@ describe('trees', () => {
     expect(changed).toHaveBeenCalledTimes(1);
     const processes = gitProcesses();
     await tree.reload();
-    expect(processes.mock.calls.some((call) => Array.isArray(call[1]) && call[1].includes('log'))).toBe(false);
+    const head = await client.head();
+    expect(
+      processes.mock.calls.some((call) => Array.isArray(call[1]) && call[1].includes('log') && call[1].includes(head!)),
+    ).toBe(false);
     expect((await tree.getChildren()).filter((node) => node.kind === 'commit')).toHaveLength(1);
     expect(changed).toHaveBeenCalledTimes(1);
     await expect(tree.select(new GitClient('/outside'))).rejects.toThrow(

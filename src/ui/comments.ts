@@ -3,14 +3,20 @@ import { SerialQueue } from '../core/collections';
 import { PULL_REQUEST_REOPEN } from '../core/pullRequests';
 import type { PullRequestReviews } from './pullRequestReviews';
 import { comparisonKey } from '../core/comparisons';
-import type { FileTarget } from '../core/documents';
-import { selectComments, deserialize, serialize, type ReviewComment } from '../core/model';
+import { canonicalCommit, type FileTarget } from '../core/documents';
+import { selectComments, deserialize, serialize, isCommitComment, type ReviewComment } from '../core/model';
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import { groupBy } from '../core/collections';
 import { anchorContext } from '../core/anchor';
 import { isRecord } from '../core/validation';
-import { shortHash, locationLabel, resolvedLabel } from '../core/presentation';
+import {
+  shortHash,
+  locationLabel,
+  resolvedLabel,
+  uncommittedLabel,
+  UNCOMMITTED_CHANGED_LABEL,
+} from '../core/presentation';
 import { commentRange } from './ranges';
 import { commentLines } from '../core/ranges';
 import { NOT_COMMENTABLE, REVIEW_TARGET_CHANGED, type ReviewDocuments } from './documents';
@@ -184,7 +190,7 @@ export class ReviewComments implements vscode.Disposable {
         }
       }
       // 同じ値の再代入でも VS Code が入力欄を作り直し、フォーカスが失われるため変更時だけ更新する。
-      const label = `${shortHash(comment.commit)} · ${locationLabel(comment)} · ${resolvedLabel(comment.resolved)}`;
+      const label = `${comment.uncommitted ? uncommittedLabel(comment.uncommitted.kind) : shortHash(comment.commit)} · ${locationLabel(comment)} · ${resolvedLabel(comment.resolved)}`;
       const state = comment.resolved ? vscode.CommentThreadState.Resolved : vscode.CommentThreadState.Unresolved;
       if (thread.label !== label) {
         thread.label = label;
@@ -291,6 +297,7 @@ export class ReviewComments implements vscode.Disposable {
     body: string,
   ): Omit<ReviewComment, 'side' | 'startLine' | 'endLine' | 'code' | 'hunkHeader' | 'excerpt'> {
     const now = new Date().toISOString();
+    const commit = canonicalCommit(target.commit, target.parent, target.pullRequest?.number, target.uncommitted);
     const pullRequest = this.pullRequestReviews.review(target);
     if (target.pullRequest && !pullRequest) {
       throw new Error(`PR の情報を取得できません。${PULL_REQUEST_REOPEN}`);
@@ -299,6 +306,7 @@ export class ReviewComments implements vscode.Disposable {
       id: randomUUID(),
       repoRoot: target.repo,
       ...(pullRequest ? { pullRequest } : {}),
+      ...(target.uncommitted ? { uncommitted: target.uncommitted } : {}),
       commit: target.commit.hash,
       parent: target.parent,
       path: target.file.path,
@@ -308,9 +316,9 @@ export class ReviewComments implements vscode.Disposable {
       createdAt: now,
       updatedAt: now,
       resolved: false,
-      subject: pullRequest?.title ?? target.commit.subject,
-      author: pullRequest?.author.login ?? target.commit.author,
-      date: pullRequest?.updatedAt ?? target.commit.date,
+      subject: pullRequest?.title ?? commit.subject,
+      author: pullRequest?.author.login ?? commit.author,
+      date: pullRequest?.updatedAt ?? commit.date,
     };
   }
   async addRangeComment(argument: unknown): Promise<void> {
@@ -487,8 +495,19 @@ export class ReviewComments implements vscode.Disposable {
     }
   }
   async clearRewritten(predicate: (comment: ReviewComment) => boolean): Promise<void> {
-    const ids = new Set(this.values.filter(predicate).map((c) => c.id));
-    if (ids.size && (await confirmClear('書き換え済みコミットのコメントを削除しますか？', '削除'))) {
+    const targets = this.values.filter(predicate);
+    const ids = new Set(targets.map((c) => c.id));
+    const commits = targets.filter(isCommitComment).length;
+    const prs = targets.filter((c) => c.pullRequest).length;
+    const uncommitted = targets.filter((c) => c.uncommitted).length;
+    const counts = [
+      commits && `書き換え済みコミットのコメント ${commits} 件`,
+      prs && `書き換え済み PR のコメント ${prs} 件`,
+      uncommitted && `${UNCOMMITTED_CHANGED_LABEL}の未コミットのコメント ${uncommitted} 件`,
+    ]
+      .filter(Boolean)
+      .join('、');
+    if (ids.size && (await confirmClear(`${counts}を削除しますか？`, '削除'))) {
       await this.mutate((values) => values.filter((c) => !ids.has(c.id)));
     }
   }

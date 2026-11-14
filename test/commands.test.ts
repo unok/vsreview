@@ -25,7 +25,7 @@ import type * as vscode from 'vscode';
 import { targetFromComment } from '../src/core/documents';
 import { activate } from '../src/extension';
 import { describe, expect, it, vi } from 'vitest';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { commitAll } from './gitFixtures';
 import { ReviewComments } from '../src/ui/comments';
@@ -34,7 +34,9 @@ import { CommitsTree, CommentsTree, COMMIT_PAGE_SIZE } from '../src/ui/trees';
 import { RewrittenComments, rewrittenTargets } from '../src/ui/rewritten';
 import { registerReviewCommands, selectRepository, updateRepository } from '../src/ui/commands';
 import { registerCommand } from '../src/ui/common';
-import { revisionUri, RevisionProvider } from '../src/ui/revisions';
+import { revisionUri, RevisionProvider, documentRef } from '../src/ui/revisions';
+import { GitClient, runGit } from '../src/git/client';
+import { createUncommittedChanges } from '../src/git/uncommitted';
 import {
   activateTab,
   TabInputTextDiff,
@@ -60,6 +62,287 @@ import {
 } from './vscodeMock';
 
 describe('commands', () => {
+  it('未コミットの変更済み判定を再取得せずにコマンドの両形式へ渡す', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'file'), 'saved');
+    const snapshot = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const saved = {
+      ...reviewComment,
+      repoRoot: directory,
+      commit: snapshot.unstaged.commit.hash,
+      parent: snapshot.unstaged.parent,
+      path: 'file',
+      status: 'A' as const,
+      side: 'file' as const,
+      startLine: 0,
+      endLine: 0,
+      uncommitted: { kind: 'unstaged' as const, createdAt: snapshot.createdAt },
+    };
+    delete saved.oldPath;
+    const state = new MemoryState();
+    state.value = serialize([saved]);
+    const access = await accessFor(directory);
+    const documents = reviewDocuments(access);
+    const comments = new ReviewComments(state, () => {}, documents, access, { review: () => undefined });
+    const changed = new ChangedFiles(access);
+    const commitsTree = new CommitsTree(() => comments.all, access, changed);
+    const capture = vi.fn(() => createUncommittedChanges(git, '2026-11-15T00:00:00Z'));
+    const rewritten = new RewrittenComments(
+      () => Promise.resolve(comments.all),
+      access,
+      { latestHead: () => undefined },
+      capture,
+    );
+    const filesTree = FilesTree.register(documents, access, revisionSnapshots(access, changed), archiveLease);
+    const pullRequestsTree = registerPullRequestsTree(commitsTree, changed, { comments: () => comments.all });
+    for (const resource of [comments, commitsTree, rewritten, filesTree, pullRequestsTree]) {
+      disposeAfter(resource);
+    }
+    registerReviewCommands(extensionContext(), {
+      archives: revisionArchives(access),
+      filesTree,
+      documents,
+      comments,
+      commitsTree,
+      rewritten,
+      access,
+      pullRequestsTree,
+      pullRequestCommands: pullRequestCommandsFor(pullRequestsTree),
+      diff: new ReviewDiff(
+        documents,
+        access,
+        changed,
+        { gh: unexpectedGh, remote: () => 'origin' },
+        { review: () => undefined },
+        archiveLease,
+      ),
+    });
+    await writeFile(join(directory, 'file'), 'edited');
+    await rewritten.refresh();
+    expect(rewritten.has(saved)).toBe(true);
+    expect(capture).toHaveBeenCalledTimes(1);
+    for (const format of ['json', 'markdown']) {
+      await commands.executeCommand('vsreview.exportComments', { scope: 'uncommitted', format });
+      const output = docs.at(-1)!.getText();
+      if (format === 'json') {
+        expect(JSON.parse(output)).toMatchObject({ comments: [saved], uncommittedSnapshots: [{ changed: true }] });
+      } else {
+        expect(output).toContain('内容が変更済み: はい');
+      }
+      expect(env.clipboard.writeText).toHaveBeenLastCalledWith(output);
+    }
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
+  async function uncommittedFixture() {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a.ts'), 'one\ntwo\nthree\nfour\nfive\n');
+    await writeFile(join(directory, 'b.ts'), 'base');
+    await commitAll(directory, 'base');
+    await writeFile(join(directory, 'a.ts'), 'ONE\ntwo\nthree\nfour\nfive\n');
+    await runGit(directory, ['add', 'a.ts']);
+    await writeFile(join(directory, 'a.ts'), 'ONE\ntwo\nthree\nfour\nFIVE\n');
+    await writeFile(join(directory, 'b.ts'), 'working');
+    workspace.workspaceFolders = [workspaceFolder(directory)];
+    globalConfiguration.set('vsreview.autoRefresh', false);
+    globalConfiguration.set('vsreview.fileView', 'list');
+    const state = new MemoryState();
+    const context = extensionContext(state);
+    const api = (await activate(context))!;
+    await waitFor(async () => expect((await api.commitsTree.getChildren())[0]?.kind).toBe('uncommitted'));
+    const groups = await api.commitsTree.getChildren((await api.commitsTree.getChildren())[0]);
+    const staged = (await api.commitsTree.getChildren(groups[0]))[0]!;
+    const unstaged = (await api.commitsTree.getChildren(groups[1]))[0]!;
+    return { directory, git, state, context, api, staged, unstaged };
+  }
+  it('URIから差分を開き直すと作業ツリー変更後も元のスナップショットを保持する', async () => {
+    const { directory, unstaged } = await uncommittedFixture();
+    if (unstaged.kind !== 'file') {
+      throw new Error('file expected');
+    }
+    const uri = revisionUri(unstaged, 'new');
+    const original = (await workspace.openTextDocument(uri)).getText();
+    await writeFile(join(directory, 'a.ts'), 'later content');
+    await commands.executeCommand('vsreview.openDiff', uri);
+    const call = commands.executeCommand.mock.calls.filter(([name]) => name === 'vscode.diff').at(-1)!;
+    const right = call[2] as vscode.Uri;
+    expect(right.toString()).toBe(uri.toString());
+    expect(documentRef(right)?.commit.hash).toBe(unstaged.commit.hash);
+    expect((await workspace.openTextDocument(right)).getText()).toBe(original);
+  });
+  it('未ステージ変更が消えたノードのファイルコメントは入力も保存も行わない', async () => {
+    const { directory, api, unstaged } = await uncommittedFixture();
+    await runGit(directory, ['add', '-A']);
+    input.mockClear();
+    await commands.executeCommand('vsreview.addFileComment', unstaged);
+    expect(input).not.toHaveBeenCalled();
+    expect(api.comments.all).toEqual([]);
+    expect(window.setStatusBarMessage).toHaveBeenCalledWith(
+      'VSReview: 選択したファイルには未コミットの変更がなくなりました',
+      5000,
+    );
+  });
+  it('選択時に区分別の最新本文を固定し、リポジトリを変更せず、変更消失を通知する', async () => {
+    const { directory, git, api, staged, unstaged } = await uncommittedFixture();
+    const before = async () => [
+      String(await runGit(directory, ['status', '--porcelain'])),
+      String(await runGit(directory, ['for-each-ref'])),
+    ];
+    const state = await before();
+    for (const [node, old, next] of [
+      [staged, 'one\ntwo\nthree\nfour\nfive\n', 'ONE\ntwo\nthree\nfour\nfive\n'],
+      [unstaged, 'ONE\ntwo\nthree\nfour\nfive\n', 'ONE\ntwo\nTHREE\nfour\nFIVE\n'],
+    ] as const) {
+      await writeFile(join(directory, 'a.ts'), 'ONE\ntwo\nTHREE\nfour\nFIVE\n');
+      commands.executeCommand.mockClear();
+      await commands.executeCommand('vsreview.openDiff', node);
+      const call = commands.executeCommand.mock.calls.find(([name]) => name === 'vscode.diff')!;
+      expect(call[3]).toBe(`a.ts (未コミットの変更（${node === staged ? 'ステージ済み' : '未ステージ'}）)`);
+      expect((await workspace.openTextDocument(call[1] as vscode.Uri)).getText()).toBe(old);
+      expect((await workspace.openTextDocument(call[2] as vscode.Uri)).getText()).toBe(next);
+    }
+    // 本文の変更はテスト自身が行ったため、比較する状態もその内容で取得する。
+    expect((await before())[1]).toBe(state[1]);
+    const stable = await before();
+    await commands.executeCommand('vsreview.openDiff', unstaged);
+    expect(await before()).toEqual(stable);
+    await runGit(directory, ['add', '-A']);
+    commands.executeCommand.mockClear();
+    await commands.executeCommand('vsreview.openDiff', unstaged);
+    expect(commands.executeCommand.mock.calls.some(([name]) => name === 'vscode.diff')).toBe(false);
+    expect(window.setStatusBarMessage).toHaveBeenCalledWith(
+      'VSReview: 選択したファイルには未コミットの変更がなくなりました',
+      5000,
+    );
+    expect(api.commitsTree.git?.root).toBe(git.root);
+  });
+  it('ツリーのファイルコメントだけ再取得し、保存からの再起動復元は同じURIと3行目を開く', async () => {
+    const { directory, state, context, api, unstaged } = await uncommittedFixture();
+    if (unstaged.kind !== 'file') {
+      throw new Error('file expected');
+    }
+    await writeFile(join(directory, 'a.ts'), 'ONE\ntwo\nnew snapshot\nfour\nFIVE\n');
+    input.mockResolvedValueOnce('file');
+    await commands.executeCommand('vsreview.addFileComment', unstaged);
+    const file = api.comments.all[0]!;
+    expect(file.commit).not.toBe(unstaged.commit.hash);
+    expect(file).toMatchObject({ side: 'file', startLine: 0, uncommitted: { kind: 'unstaged' } });
+    await commands.executeCommand('vsreview.openComment', file);
+    const pair = commands.executeCommand.mock.calls.filter(([name]) => name === 'vscode.diff').at(-1)!;
+    const right = pair[2] as vscode.Uri;
+    await writeFile(join(directory, 'a.ts'), 'later');
+    input.mockResolvedValueOnce('URI file');
+    await commands.executeCommand('vsreview.addFileComment', right);
+    expect(api.comments.all[1]?.commit).toBe(file.commit);
+    await commands.executeCommand('vsreview.addRangeComment', {
+      thread: controller.createCommentThread(right, new Range(2, 0, 2, 12) as vscode.Range, []),
+      text: '名前を変えてください',
+    });
+    const saved = api.comments.all[2]!;
+    expect(saved.startLine).toBe(3);
+    for (const subscription of [...context.subscriptions].reverse()) {
+      subscription.dispose();
+    }
+    const restored = (await activate(extensionContext(state)))!;
+    await commands.executeCommand('vsreview.openComment', saved);
+    const reopened = commands.executeCommand.mock.calls.filter(([name]) => name === 'vscode.diff').at(-1)!;
+    expect((reopened[1] as vscode.Uri).toString()).toBe((pair[1] as vscode.Uri).toString());
+    expect((reopened[2] as vscode.Uri).toString()).toBe(right.toString());
+    expect(reopened[4]).toMatchObject({ selection: new Range(2, 0, 2, 12) });
+    expect((await workspace.openTextDocument(right)).getText()).toContain('new snapshot');
+    warning.mockResolvedValueOnce(undefined);
+    await commands.executeCommand('vsreview.clearRewrittenComments');
+    expect(warning).toHaveBeenCalledWith(
+      'VSReview: 内容が変更済みの未コミットのコメント 3 件を削除しますか？',
+      { modal: true },
+      '削除',
+    );
+    expect(restored.comments.all).toHaveLength(3);
+    expect(documentRef(right)?.uncommitted).toEqual(saved.uncommitted);
+    await waitFor(async () => expect((await restored.commitsTree.getChildren())[0]?.kind).toBe('uncommitted'));
+    await commands.executeCommand('vsreview.refresh');
+    expect((await restored.commitsTree.getChildren())[0]?.kind).toBe('uncommitted');
+    expect(restored.comments.all).toHaveLength(3);
+    const { commonDir } = await (await accessFor(directory)).client(directory).directories();
+    await rm(join(commonDir, 'objects', saved.commit.slice(0, 2), saved.commit.slice(2)));
+    const tree = window.createTreeView.mock.calls.filter(([id]) => id === 'vsreview.comments').at(-1)![1]
+      .treeDataProvider as CommentsTree;
+    expect(tree.getTreeItem({ kind: 'comment', comment: saved }).tooltip).toBe(`${saved.body}\n\n${saved.excerpt}`);
+    commands.executeCommand.mockClear();
+    await commands.executeCommand('vsreview.openComment', saved);
+    expect(window.showInformationMessage).toHaveBeenCalledWith(
+      expect.stringContaining('スナップショットのオブジェクトが見つからない'),
+    );
+    expect(commands.executeCommand.mock.calls.some(([name]) => name === 'vscode.diff')).toBe(false);
+    expect(window.showErrorMessage).not.toHaveBeenCalled();
+  });
+  it('削除コマンドは作業ツリーの最新状態を判定し、変更済みだけを削除する', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a'), 'base');
+    await commitAll(directory, 'base');
+    const initial = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const saved = {
+      ...reviewComment,
+      repoRoot: directory,
+      commit: initial.unstaged.commit.hash,
+      parent: initial.unstaged.parent,
+      uncommitted: { kind: 'unstaged' as const, createdAt: initial.createdAt },
+    };
+    await writeFile(join(directory, 'a'), 'edited');
+    const current = await createUncommittedChanges(git, '2026-11-14T01:00:00Z');
+    const state = new MemoryState();
+    state.value = serialize([
+      saved,
+      { ...saved, id: 'second' },
+      { ...saved, id: 'unchanged', commit: current.unstaged.commit.hash, parent: current.unstaged.parent },
+      { ...reviewComment, id: 'rewritten', repoRoot: directory },
+      { ...reviewComment, id: 'reachable', repoRoot: directory, commit: (await git.head())! },
+    ]);
+    workspace.workspaceFolders = [workspaceFolder(directory)];
+    globalConfiguration.set('vsreview.autoRefresh', false);
+    const api = (await activate(extensionContext(state)))!;
+    warning.mockResolvedValueOnce('削除');
+    await commands.executeCommand('vsreview.clearRewrittenComments');
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      'VSReview: 書き換え済みコミットのコメント 1 件、内容が変更済みの未コミットのコメント 2 件を削除しますか？',
+      { modal: true },
+      '削除',
+    );
+    expect(api.comments.all.map((c) => c.id)).toEqual(['unchanged', 'reachable']);
+    // 削除後に始まる判定を回収し、fixture の破棄と競合させない。
+    await commands.executeCommand('vsreview.refresh');
+  });
+  it('変更済み判定後に内容を戻し、取得が失敗したら削除の確認も保存もしない', async () => {
+    const { directory, api, state, unstaged } = await uncommittedFixture();
+    input.mockResolvedValueOnce('保存するコメント');
+    await commands.executeCommand('vsreview.addFileComment', unstaged);
+    // 追加後の非同期判定を終えてから、取得失敗を注入する。
+    await commands.executeCommand('vsreview.refresh');
+    const saved = [...api.comments.all];
+    expect(saved).toHaveLength(1);
+    await writeFile(join(directory, 'a.ts'), 'edited');
+    warning.mockResolvedValueOnce(undefined);
+    await commands.executeCommand('vsreview.clearRewrittenComments');
+    expect(warning).toHaveBeenCalledWith(
+      'VSReview: 内容が変更済みの未コミットのコメント 1 件を削除しますか？',
+      { modal: true },
+      '削除',
+    );
+    await writeFile(join(directory, 'a.ts'), 'ONE\ntwo\nthree\nfour\nFIVE\n');
+    const writes = [...state.writes];
+    const head = vi.spyOn(GitClient.prototype, 'head').mockRejectedValue(new Error('snapshot unavailable'));
+    warning.mockClear().mockResolvedValueOnce('削除');
+    try {
+      await commands.executeCommand('vsreview.clearRewrittenComments');
+      expect(window.showErrorMessage).toHaveBeenCalledWith('VSReview: snapshot unavailable');
+      expect(warning).not.toHaveBeenCalled();
+      expect(api.comments.all).toEqual(saved);
+      expect(state.writes).toEqual(writes);
+    } finally {
+      head.mockRestore();
+      // 失敗経路でも進行中の判定を回収してから fixture を破棄する。
+      await commands.executeCommand('vsreview.refresh');
+    }
+  });
   describe('レビューコマンド', () => {
     it('コマンド入口は不正引数を拒否し、検出済み差分へのコメントだけ保存する', async () => {
       const { directory, git } = await repository();
@@ -213,6 +496,9 @@ describe('commands', () => {
       { scope: 'other', format: 'json' },
       { scope: 'commit', format: 'json' },
       { scope: 'all', format: 'Markdown' },
+      { scope: 'uncommitted', format: 'Markdown' },
+      { scope: 'uncommitted' },
+      { scope: 'uncommitted', format: 'json', purpose: 'edit' },
       { scope: 'all' },
       { format: 'json' },
       { scope: undefined },
@@ -593,6 +879,34 @@ function commentFile(tree: CommentsTree, id: string, path: string) {
 }
 
 describe('コメントノードの一括削除コマンド', () => {
+  it('未コミットの各グループではコミット削除を拒否し、ファイル削除はSHAも区別する', async () => {
+    const { api, tree, first, state } = await setupCommentNodes((c) => [
+      { ...c, id: 's1', commit: 'e'.repeat(40), uncommitted: { kind: 'staged', createdAt: c.createdAt } },
+      { ...c, id: 's2', commit: 'd'.repeat(40), uncommitted: { kind: 'staged', createdAt: c.createdAt } },
+    ]);
+    const group = tree.getChildren().find((node) => node.kind === 'uncommittedGroup')!;
+    const snapshots = tree.getChildren(group);
+    for (const node of [
+      group,
+      ...snapshots,
+      { kind: 'group', label: '', comments: [api.comments.all.find((c) => c.id === 's1')!] },
+    ]) {
+      await commands.executeCommand('vsreview.clearCommitComments', node);
+    }
+    expect(warning).not.toHaveBeenCalled();
+    expect(state.writes).toEqual([]);
+    warning.mockResolvedValueOnce('削除');
+    await commands.executeCommand('vsreview.clearFileComments', tree.getChildren(snapshots[0])[0]);
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      'VSReview: このファイルのコメント 1 件を削除しますか？',
+      { modal: true },
+      '削除',
+    );
+    expect(api.comments.all.some((c) => c.id === 's1')).toBe(false);
+    expect(api.comments.all.some((c) => c.id === 's2' && c.path === first.path)).toBe(true);
+    // 削除後に始まる判定を回収し、fixture の破棄と競合させない。
+    await commands.executeCommand('vsreview.refresh');
+  });
   it.each([
     [
       'clearCommitComments',

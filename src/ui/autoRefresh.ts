@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
 import { RefreshQueue } from '../core/refreshQueue';
-import { shortHash } from '../core/presentation';
+import { shortHash, uncommittedLabel, UNCOMMITTED_CHANGED_LABEL } from '../core/presentation';
 import { comparisonKey } from '../core/comparisons';
+import { isWithin, repoRelativePath } from '../core/paths';
+import type { UncommittedChanges } from '../core/uncommitted';
+import { captureUncommittedChanges, type CaptureUncommitted } from '../git/uncommitted';
 import { showError, showStatus } from './common';
 import type { RepositoryAccess } from './repositories';
 import type { CommitsTree } from './trees';
@@ -15,12 +18,15 @@ export class AutoRefresh implements vscode.Disposable {
   private enabled = false;
   private disposed = false;
   private notified = new Set<string>();
+  private history = false;
+  private changes = new Map<string, { index: boolean; paths: Set<string> }>();
   private readonly queue = new RefreshQueue(() => this.refresh(), showError, AUTO_REFRESH_DEBOUNCE_MS);
   constructor(
     private readonly access: RepositoryAccess,
     private readonly commits: CommitsTree,
     private readonly rewritten: RewrittenComments,
     private readonly documents: ReviewDocuments,
+    private readonly captureUncommitted: CaptureUncommitted = captureUncommittedChanges,
   ) {}
   async rewatch(options: { refresh?: boolean } = {}): Promise<void> {
     const generation = ++this.generation;
@@ -40,12 +46,25 @@ export class AutoRefresh implements vscode.Disposable {
         for (const [dir, pattern] of [
           [gitDir, 'HEAD'],
           [commonDir, '{refs/heads/**,packed-refs}'],
+          [gitDir, 'index'],
+          [root, '**'],
         ] as const) {
           const watcher = vscode.workspace.createFileSystemWatcher(
             new vscode.RelativePattern(vscode.Uri.file(dir), pattern),
           );
-          const request = (): void => {
+          const request = (uri: vscode.Uri): void => {
+            if (pattern === '**') {
+              this.requestWorkingTreeRefresh(root, generation, uri.fsPath);
+              return;
+            }
             if (generation === this.generation && !this.disposed) {
+              if (pattern === 'index') {
+                const change = this.changes.get(root) ?? { index: false, paths: new Set<string>() };
+                change.index = true;
+                this.changes.set(root, change);
+              } else {
+                this.history = true;
+              }
               this.queue.request();
             }
           };
@@ -56,6 +75,11 @@ export class AutoRefresh implements vscode.Disposable {
             watcher.onDidDelete(request),
           );
         }
+        this.watchers.push(
+          vscode.workspace.onDidSaveTextDocument((document) => {
+            this.requestWorkingTreeRefresh(root, generation, document.uri.fsPath);
+          }),
+        );
       } catch (error) {
         if (generation === this.generation && !this.disposed) {
           showError(error);
@@ -63,19 +87,55 @@ export class AutoRefresh implements vscode.Disposable {
       }
     }
     if (generation === this.generation && !this.disposed && options.refresh !== false) {
+      this.history = true;
       this.queue.request();
     }
+  }
+  private requestWorkingTreeRefresh(root: string, generation: number, fsPath: string): void {
+    if (generation !== this.generation || this.disposed) {
+      return;
+    }
+    const path = repoRelativePath(root, fsPath);
+    if (!isWithin(root, fsPath) || path.split('/').includes('.git')) {
+      return;
+    }
+    const change = this.changes.get(root) ?? { index: false, paths: new Set<string>() };
+    change.paths.add(path);
+    this.changes.set(root, change);
+    this.queue.request();
   }
   private async refresh(): Promise<void> {
     if (!this.enabled || this.disposed) {
       return;
     }
     const generation = this.generation;
-    await this.commits.reload();
+    const history = this.history;
+    const changes = this.changes;
+    this.history = false;
+    this.changes = new Map();
+    const roots = history ? undefined : await this.uncommittedRoots(changes, generation);
+    if (roots?.size === 0) {
+      return;
+    }
     if (generation !== this.generation || this.disposed) {
       return;
     }
-    await this.rewritten.refresh();
+    const snapshots = new Map<string, Promise<UncommittedChanges>>();
+    const captureUncommitted: CaptureUncommitted = (git) => {
+      let pending = snapshots.get(git.root);
+      if (!pending) {
+        pending = this.captureUncommitted(git);
+        snapshots.set(git.root, pending);
+      }
+      return pending;
+    };
+    if (history || (this.commits.git && roots?.has(this.commits.git.root))) {
+      await this.commits.reload({ captureUncommitted, onlyIfChanged: !history });
+    }
+    if (generation !== this.generation || this.disposed) {
+      return;
+    }
+    await this.rewritten.refresh({ captureUncommitted, onlyIfChanged: !history, ...(roots ? { roots } : {}) });
     if (generation !== this.generation || this.disposed) {
       return;
     }
@@ -88,15 +148,47 @@ export class AutoRefresh implements vscode.Disposable {
       current.add(key);
       if (!this.notified.has(key)) {
         showStatus(
-          target.pullRequest
-            ? `開いている差分の PR #${target.pullRequest.number}（${shortHash(target.commit)}）は書き換え済みです`
-            : `開いている差分のコミット ${shortHash(target.commit)} は書き換え済みです`,
+          target.uncommitted
+            ? `開いている差分の${uncommittedLabel(target.uncommitted.kind)}は${UNCOMMITTED_CHANGED_LABEL}です`
+            : target.pullRequest
+              ? `開いている差分の PR #${target.pullRequest.number}（${shortHash(target.commit)}）は書き換え済みです`
+              : `開いている差分のコミット ${shortHash(target.commit)} は書き換え済みです`,
         );
       }
     }
     this.notified = current;
   }
+  private async uncommittedRoots(
+    changes: Map<string, { index: boolean; paths: Set<string> }>,
+    generation: number,
+  ): Promise<Set<string>> {
+    const roots = new Set<string>();
+    for (const [root, change] of changes) {
+      if (!this.access.isKnown(root)) {
+        continue;
+      }
+      if (change.index) {
+        roots.add(root);
+        continue;
+      }
+      try {
+        const ignored = await this.access.client(root).ignoredPaths([...change.paths]);
+        if ([...change.paths].some((path) => !ignored.has(path))) {
+          roots.add(root);
+        }
+      } catch (error) {
+        // 無視判定の失敗で更新を止めると、一覧が古いまま残る。
+        if (generation === this.generation && !this.disposed) {
+          showError(error);
+        }
+        roots.add(root);
+      }
+    }
+    return roots;
+  }
   private clearWatchers(): void {
+    this.history = false;
+    this.changes = new Map();
     for (const watcher of this.watchers.splice(0)) {
       watcher.dispose();
     }

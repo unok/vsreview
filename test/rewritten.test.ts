@@ -9,6 +9,7 @@ import {
   accessFor,
   disposeAfter,
   reviewComment,
+  workspaceFolder,
 } from './fixtures';
 import { basename, join } from 'node:path';
 import { GhClient } from '../src/git/gh';
@@ -17,13 +18,265 @@ import { ChangedFiles } from '../src/ui/repositories';
 import { window, activateTab, TabInputTextDiff } from './vscodeMock';
 import { GitClient, runGit } from '../src/git/client';
 import { CommentsTree } from '../src/ui/trees';
+import { targetFromComment } from '../src/core/documents';
 import { RewrittenComments } from '../src/ui/rewritten';
 import { describe, it, expect, vi } from 'vitest';
 import { writeFile } from 'node:fs/promises';
-import { commitAll } from './gitFixtures';
+import { commitAll, gitAsAuthor } from './gitFixtures';
 import { revisionUri } from '../src/ui/revisions';
+import { createUncommittedChanges } from '../src/git/uncommitted';
+import type { UncommittedChanges } from '../src/core/uncommitted';
+
+function savedChanges(repoRoot: string, changes: UncommittedChanges) {
+  return (['staged', 'unstaged'] as const).map((kind) => ({
+    ...reviewComment,
+    repoRoot,
+    id: kind,
+    commit: changes[kind].commit.hash,
+    parent: changes[kind].parent,
+    uncommitted: { kind, ...(changes.head ? { head: changes.head } : {}), createdAt: changes.createdAt },
+  }));
+}
 
 describe('rewritten', () => {
+  it('通常更新は後から来た古い共有結果で削除判定を終えない', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'file'), 'saved');
+    const saved = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    await writeFile(join(directory, 'file'), 'edited');
+    const stale = await createUncommittedChanges(git, '2026-11-15T00:00:00Z');
+    await writeFile(join(directory, 'file'), 'saved');
+    let release!: (value: UncommittedChanges) => void;
+    const capture = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise<UncommittedChanges>((resolve) => {
+          release = resolve;
+        }),
+      )
+      .mockResolvedValue(saved);
+    const comment = savedChanges(directory, saved)[1]!;
+    const rewritten = new RewrittenComments(
+      () => Promise.resolve([comment]),
+      await accessFor(directory),
+      { latestHead: () => undefined },
+      capture,
+    );
+    disposeAfter(rewritten);
+    const manual = rewritten.refresh();
+    await waitFor(() => expect(capture).toHaveBeenCalledTimes(1));
+    await rewritten.refresh({ captureUncommitted: () => Promise.resolve(stale), onlyIfChanged: true });
+    release(saved);
+    await manual;
+    expect(rewritten.has(comment)).toBe(false);
+  });
+  it('未コミット限定更新は履歴判定を再実行せず、対象から消えたキーを除く', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'file'), 'head');
+    await commitAll(directory, 'head');
+    const latest = await git.head();
+    const access = await accessFor(directory);
+    const ordinary = { ...reviewComment, repoRoot: directory, commit: 'a'.repeat(40) };
+    const pr = {
+      ...ordinary,
+      commit: 'b'.repeat(40),
+      pullRequest: { number: 12, headRefOid: 'b'.repeat(40), mergeBase: 'a'.repeat(40) },
+    };
+    const targets = [ordinary, pr];
+    const rewritten = new RewrittenComments(() => Promise.resolve(targets), access, {
+      latestHead: () => latest,
+    });
+    disposeAfter(rewritten);
+    await rewritten.refresh();
+    const previous = targets.map(rewritten.has);
+    expect(previous).toEqual([true, true]);
+    const reachable = vi.spyOn(GitClient.prototype, 'isReachable');
+    const ancestor = vi.spyOn(GitClient.prototype, 'isAncestor');
+    const exists = vi.spyOn(GitClient.prototype, 'hasCommit');
+    await rewritten.refresh({ onlyIfChanged: true });
+    expect(targets.map(rewritten.has)).toEqual(previous);
+    targets.splice(0);
+    await rewritten.refresh({ onlyIfChanged: true });
+    expect([rewritten.has(ordinary), rewritten.has(pr)]).toEqual([false, false]);
+    expect(reachable).not.toHaveBeenCalled();
+    expect(ancestor).not.toHaveBeenCalled();
+    expect(exists).not.toHaveBeenCalled();
+  });
+  it('同じ既定取得の限定更新が割り込んでも通常更新は履歴を再判定する', async () => {
+    const { directory } = await repository();
+    const target = { ...reviewComment, repoRoot: directory };
+    const rewritten = new RewrittenComments(() => Promise.resolve([target]), await accessFor(directory), {
+      latestHead: () => undefined,
+    });
+    disposeAfter(rewritten);
+    let release!: (value: boolean) => void;
+    const reachable = vi
+      .spyOn(GitClient.prototype, 'isReachable')
+      .mockReturnValueOnce(
+        new Promise<boolean>((resolve) => {
+          release = resolve;
+        }),
+      )
+      .mockResolvedValue(false);
+    const manual = rewritten.refresh();
+    await waitFor(() => expect(reachable).toHaveBeenCalledTimes(1));
+    await rewritten.refresh({ onlyIfChanged: true });
+    release(true);
+    await manual;
+    expect(rewritten.has(target)).toBe(true);
+  });
+  it.each(['manual-first', 'automatic-first'])('重なった通常更新の通知を失わない: %s', async (order) => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const access = await accessFor((await repository()).directory);
+    const targets = vi.fn(async () => {
+      await blocked;
+      return [];
+    });
+    const rewritten = new RewrittenComments(targets, access, { latestHead: () => undefined });
+    disposeAfter(rewritten);
+    const changed = vi.fn();
+    rewritten.onDidChange(changed);
+    const first = rewritten.refresh(order === 'manual-first' ? {} : { onlyIfChanged: true });
+    const second = rewritten.refresh(order === 'manual-first' ? { onlyIfChanged: true } : {});
+    release();
+    await Promise.all([first, second]);
+    expect(changed).toHaveBeenCalledTimes(1);
+    await rewritten.refresh({ onlyIfChanged: true });
+    expect(changed).toHaveBeenCalledTimes(1);
+    await rewritten.refresh();
+    expect(changed).toHaveBeenCalledTimes(2);
+  });
+  it('未コミットの保存コメントと開いた差分を区分別に判定し、編集と復元に追従する', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'file'), 'base');
+    await commitAll(directory, 'base');
+    await writeFile(join(directory, 'file'), 'staged');
+    await runGit(directory, ['add', 'file']);
+    await writeFile(join(directory, 'file'), 'working');
+    const saved = savedChanges(directory, await createUncommittedChanges(git, '2026-11-14T00:00:00Z'));
+    const access = await accessFor(directory);
+    const comment = saved[1]!;
+    const target = targetFromComment(comment);
+    activateTab(new TabInputTextDiff(revisionUri(target, 'old'), revisionUri(target, 'new')));
+    const documents = reviewDocuments(access);
+    const ordinary = { ...reviewComment, repoRoot: directory, commit: 'c'.repeat(40) };
+    const rewritten = new RewrittenComments(
+      async () => [saved[0]!, ordinary, ...(await documents.openDiffTargets())],
+      access,
+      { latestHead: () => undefined },
+    );
+    disposeAfter(rewritten);
+    await rewritten.refresh();
+    expect(rewritten.has(comment)).toBe(false);
+    expect(rewritten.has((await documents.openDiffTargets())[0]!)).toBe(false);
+    expect(rewritten.has(ordinary)).toBe(true);
+    const tree = new CommentsTree(() => [comment], rewritten);
+    disposeAfter(tree);
+    expect(tree.getTreeItem(tree.getChildren()[0]!).label).toBe(
+      `${basename(directory)} · 未コミットの変更（未ステージ）`,
+    );
+    expect(tree.getTreeItem(tree.getChildren()[0]!).description).toBe('1 コメント');
+    await writeFile(join(directory, 'file'), 'edited');
+    await rewritten.refresh();
+    expect(rewritten.has(saved[0]!)).toBe(false);
+    expect(rewritten.has(comment)).toBe(true);
+    expect(tree.getTreeItem(tree.getChildren()[0]!).description).toBe('1 コメント · 内容が変更済み');
+    await writeFile(join(directory, 'file'), 'working');
+    await rewritten.refresh();
+    expect(rewritten.has(comment)).toBe(false);
+  });
+  it.each(['stage', 'commit', 'head'] as const)('%sによる区分ごとの変化を判定する', async (operation) => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'file'), 'base');
+    await commitAll(directory, 'base');
+    await writeFile(join(directory, 'file'), 'staged');
+    await runGit(directory, ['add', 'file']);
+    if (operation === 'head') {
+      await commitAll(directory, 'indexed');
+    }
+    if (operation === 'stage') {
+      await writeFile(join(directory, 'file'), 'working');
+    }
+    const saved = savedChanges(directory, await createUncommittedChanges(git, '2026-11-14T00:00:00Z'));
+    const rewritten = new RewrittenComments(() => Promise.resolve(saved), await accessFor(directory), {
+      latestHead: () => undefined,
+    });
+    disposeAfter(rewritten);
+    await rewritten.refresh();
+    expect(saved.map(rewritten.has)).toEqual([false, false]);
+    if (operation === 'stage') {
+      await runGit(directory, ['add', 'file']);
+    } else {
+      await gitAsAuthor(directory, ['commit', ...(operation === 'head' ? ['--allow-empty'] : []), '-m', 'committed']);
+    }
+    await rewritten.refresh();
+    expect(saved.map(rewritten.has)).toEqual([true, operation === 'stage']);
+  });
+  it('リポジトリごとに一度取得し、失敗したリポジトリだけ削除対象から外して復旧する', async () => {
+    const first = await repository();
+    const second = await repository();
+    for (const { directory } of [first, second]) {
+      await writeFile(join(directory, 'file'), 'saved');
+    }
+    const saved = (
+      await Promise.all(
+        [first, second].map(async ({ directory, git }) =>
+          savedChanges(directory, await createUncommittedChanges(git, '2026-11-14T00:00:00Z')),
+        ),
+      )
+    ).flat();
+    const access = await accessFor(first.directory);
+    await access.discover([workspaceFolder(first.directory), workspaceFolder(second.directory, 1)]);
+    const capture = vi.fn((git: GitClient) => createUncommittedChanges(git, '2026-11-15T00:00:00Z'));
+    const rewritten = new RewrittenComments(
+      () => Promise.resolve(saved),
+      access,
+      { latestHead: () => undefined },
+      capture,
+    );
+    disposeAfter(rewritten);
+    await rewritten.refresh();
+    expect(saved.map(rewritten.has)).toEqual([false, false, false, false]);
+    expect(capture).toHaveBeenCalledTimes(2);
+    await writeFile(join(first.directory, 'file'), 'edited');
+    await rewritten.refresh();
+    expect(saved.map(rewritten.has)).toEqual([false, true, false, false]);
+    await writeFile(join(second.directory, 'file'), 'second edited');
+    capture.mockRejectedValueOnce(new Error('capture failed'));
+    await rewritten.refresh();
+    expect(saved.map(rewritten.has)).toEqual([false, false, false, true]);
+    expect(window.showErrorMessage).toHaveBeenCalledWith('VSReview: capture failed');
+    await writeFile(join(first.directory, 'file'), 'saved');
+    await writeFile(join(second.directory, 'file'), 'saved');
+    await rewritten.refresh();
+    expect(saved.map(rewritten.has)).toEqual([false, false, false, false]);
+  });
+  it('初回取得失敗は未変更のまま通知し、対象なし・管理外では取得しない', async () => {
+    const { directory } = await repository();
+    const saved = { ...reviewComment, repoRoot: directory, uncommitted: { kind: 'unstaged' as const, createdAt: '' } };
+    let targets = [saved];
+    const capture = vi.fn<(git: GitClient) => Promise<UncommittedChanges>>().mockRejectedValue(new Error('failed'));
+    const rewritten = new RewrittenComments(
+      () => Promise.resolve(targets),
+      await accessFor(directory),
+      { latestHead: () => undefined },
+      capture,
+    );
+    disposeAfter(rewritten);
+    await rewritten.refresh();
+    expect(rewritten.has(saved)).toBe(false);
+    expect(window.showErrorMessage).toHaveBeenCalledWith('VSReview: failed');
+    capture.mockClear();
+    targets = [];
+    await rewritten.refresh();
+    targets = [{ ...saved, repoRoot: '/outside' }];
+    await rewritten.refresh();
+    expect(capture).not.toHaveBeenCalled();
+    expect(rewritten.has(targets[0]!)).toBe(false);
+  });
   describe('コミットの書き換え判定', () => {
     it('HEAD 到達可能・別ブランチのみ・書き換え・オブジェクト不在を区別する', async () => {
       const { directory, git } = await repository();

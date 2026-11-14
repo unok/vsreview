@@ -8,7 +8,7 @@ import { orderedFiles } from './fileView';
 import { commentRange } from './ranges';
 import type { ReviewComment } from '../core/model';
 import type { FileTarget } from '../core/documents';
-import { shortHash } from '../core/presentation';
+import { shortHash, uncommittedLabel } from '../core/presentation';
 import type { ReviewDocuments } from './documents';
 import { ChangedFiles, type RepositoryAccess } from './repositories';
 import { showInfo, showStatus } from './common';
@@ -27,6 +27,14 @@ export class ReviewDiff {
   }
   private async showDiff(target: FileTarget, comment?: ReviewComment): Promise<void> {
     const git = this.access.client(target.repo);
+    if (target.uncommitted) {
+      // HEAD のない staged の親は空ツリーなので、コミットの存在確認から除く。
+      const checkParent = target.uncommitted.kind === 'unstaged' || target.uncommitted.head !== undefined;
+      if (!(await git.hasCommit(target.commit.hash)) || (checkParent && !(await git.hasCommit(target.parent)))) {
+        showInfo('保存したスナップショットのオブジェクトが見つからないため、差分を開けません');
+        return;
+      }
+    }
     if (target.pullRequest) {
       await restorePullRequestComparison(
         git,
@@ -60,7 +68,7 @@ export class ReviewDiff {
       'vscode.diff',
       left,
       right,
-      `${target.file.path} (${shortHash(target.commit.hash)})`,
+      `${target.file.path} (${target.uncommitted ? uncommittedLabel(target.uncommitted.kind) : shortHash(target.commit.hash)})`,
       { preview: true, ...(range && comment?.side === 'new' ? { selection: range } : {}) },
     );
     if (range && comment) {

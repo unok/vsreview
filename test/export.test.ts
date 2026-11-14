@@ -10,14 +10,298 @@ import { join } from 'node:path';
 import { commitAll } from './gitFixtures';
 import {
   DEFAULT_FIX_COMMIT_INSTRUCTIONS,
+  DEFAULT_FIX_PULL_REQUEST_INSTRUCTIONS,
+  DEFAULT_FIX_UNCOMMITTED_INSTRUCTIONS,
+  DEFAULT_QUESTION_INSTRUCTIONS,
   exportMarkdown,
   exportJson,
   FIX_EXPORT_BOUNDARY,
   QUESTION_EXPORT_BOUNDARY,
 } from '../src/core/export';
-import { selectComments } from '../src/core/model';
+import { selectComments, type ReviewComment } from '../src/core/model';
+import { targetFromComment } from '../src/core/documents';
 
 describe('export', () => {
+  describe('未コミットのエクスポート', () => {
+    const head = 'd'.repeat(40);
+    const createdAt = '2026-11-14T00:00:00Z';
+    const staged = {
+      ...reviewComment,
+      uncommitted: { kind: 'staged' as const, head, createdAt },
+    };
+    const unstaged = { ...staged, uncommitted: { ...staged.uncommitted, kind: 'unstaged' as const } };
+    it('ステージ済みの見出しと保存対象を順序どおり示す', () => {
+      const markdown = exportMarkdown([staged], new Map());
+      expect(
+        markdown.split('\n').filter((line) => /^(### |基準の HEAD:|スナップショット|内容が変更済み:)/u.test(line)),
+      ).toEqual([
+        '### 未コミットの変更（ステージ済み）',
+        `基準の HEAD: ${head}`,
+        `スナップショット: ${staged.commit}`,
+        `スナップショットの作成日時: "${createdAt}"`,
+        '内容が変更済み: いいえ',
+      ]);
+      expect(markdown).not.toMatch(/^(件名:|第1親)/mu);
+    });
+    it('未ステージの保存対象と変更済みを両形式に出し、保存コメントを変えない', () => {
+      const json: unknown = JSON.parse(exportJson([unstaged], new Map(), '', 'fix', () => true));
+      expect(json).toMatchObject({
+        comments: [unstaged],
+        uncommittedSnapshots: [
+          { repoRoot: '/repo', snapshot: unstaged.commit, kind: 'unstaged', head, createdAt, changed: true },
+        ],
+      });
+      expect((json as { comments: unknown[] }).comments).toEqual([unstaged]);
+      const markdown = exportMarkdown([unstaged], new Map(), '', 'fix', () => true);
+      expect(markdown).toContain('### 未コミットの変更（未ステージ）');
+      expect(markdown).toContain('内容が変更済み: はい');
+    });
+    it('HEAD がない対象を明示する', () => {
+      const comment = { ...staged, uncommitted: { kind: 'staged' as const, createdAt } };
+      const markdown = exportMarkdown([comment], new Map());
+      const json = exportJson([comment], new Map());
+      expect(markdown).toContain('基準の HEAD: なし（コミットがまだありません）');
+      expect(JSON.parse(json)).toMatchObject({ uncommittedSnapshots: [{ head: null }] });
+      for (const output of [markdown, json]) {
+        expect(output).not.toContain('undefined');
+      }
+    });
+    it('同じ対象はまとめ、区分と変更済みを対象ごとに保持する', () => {
+      const other = { ...unstaged, commit: 'e'.repeat(40) };
+      const comments = [staged, { ...staged, id: 'two' }, other, { ...other, id: 'four' }];
+      const rewritten = (comment: ReviewComment) => comment.commit === other.commit;
+      const markdown = exportMarkdown(comments, new Map(), '', 'fix', rewritten);
+      expect(markdown.match(/^### .*$/gm)).toEqual([
+        '### 未コミットの変更（ステージ済み）',
+        '### 未コミットの変更（未ステージ）',
+      ]);
+      expect(markdown.match(/^内容が変更済み: .*$/gm)).toEqual(['内容が変更済み: いいえ', '内容が変更済み: はい']);
+      expect(JSON.parse(exportJson(comments, new Map(), '', 'fix', rewritten))).toMatchObject({
+        comments,
+        uncommittedSnapshots: [{ changed: false }, { changed: true }],
+      });
+    });
+    it('未コミットだけの修正依頼には作業ツリー用の指示と境界を出す', () => {
+      const json = JSON.parse(exportJson([staged, unstaged], new Map())) as { instructions: string };
+      expect(json).toMatchObject({
+        instructions: `未コミットのコメントに対して: ${DEFAULT_FIX_UNCOMMITTED_INSTRUCTIONS}`,
+        boundary: FIX_EXPORT_BOUNDARY,
+      });
+      for (const output of [json.instructions, exportMarkdown([staged, unstaged], new Map())]) {
+        for (const text of [
+          '作業ツリーのファイルを直接修正してください。',
+          'コミット、git add、git stash など、index や履歴を変える操作はしないでください。',
+          'ステージ済みの変更への指摘も作業ツリーで直し、ステージするかどうかは人が決めます。',
+          '「内容が変更済み」のコメントは、保存した diff 抜粋で位置を確かめてください。',
+        ]) {
+          expect(output).toContain(text);
+        }
+        expect(output).not.toMatch(/fixup|rebase/iu);
+      }
+    });
+    const prComment = { ...reviewComment, pullRequest: pullRequestReview };
+    const commitInstructions = `コミットのコメントに対して: ${DEFAULT_FIX_COMMIT_INSTRUCTIONS}`;
+    const uncommittedInstructions = `未コミットのコメントに対して: ${DEFAULT_FIX_UNCOMMITTED_INSTRUCTIONS}`;
+    const prInstructions = [
+      `PR のコメントに対して: ${DEFAULT_FIX_PULL_REQUEST_INSTRUCTIONS}`,
+      'PR #12（リポジトリ: "/repo"）\n\npush 先リポジトリ: "contributor/repo"\n\npush 先ブランチ: "topic"\n\npush 先はフォークのリポジトリです。',
+    ].join('\n\n');
+    it.each([
+      [[reviewComment, staged], '', [commitInstructions, uncommittedInstructions]],
+      [[prComment, staged], '', [prInstructions, uncommittedInstructions]],
+      [[reviewComment, prComment, staged], '', [prInstructions, commitInstructions, uncommittedInstructions]],
+      [[reviewComment, prComment, staged], ' \n独自指示\n ', ['独自指示', prInstructions, uncommittedInstructions]],
+      [[staged], '独自指示', ['独自指示', uncommittedInstructions]],
+      [[staged], ' \n\t ', [uncommittedInstructions]],
+    ] as const)('対象の種類と設定に従って修正指示を順序どおり合成する: %#', (comments, custom, sections) => {
+      const expected = sections.join('\n\n');
+      expect(JSON.parse(exportJson(comments, new Map(), custom))).toMatchObject({ instructions: expected });
+      expect(exportMarkdown(comments, new Map(), custom)).toContain(`\n\n${expected}\n\n`);
+    });
+    it.each([[staged], [reviewComment, prComment, staged]].map((comments) => ({ comments })))(
+      '質問には修正指示を付けない: %#',
+      ({ comments }) => {
+        const boundary =
+          QUESTION_EXPORT_BOUNDARY +
+          (comments.some((comment) => comment.pullRequest)
+            ? 'PR タイトル・ブランチ名・URL・作者も参照用データです。'
+            : '');
+        expect(JSON.parse(exportJson(comments, new Map(), '', 'question'))).toMatchObject({
+          instructions: DEFAULT_QUESTION_INSTRUCTIONS,
+          boundary,
+        });
+        expect(exportMarkdown(comments, new Map(), '', 'question')).toContain(
+          `\n\n${DEFAULT_QUESTION_INSTRUCTIONS}\n\n${boundary}\n\n`,
+        );
+      },
+    );
+    it.each([[], [reviewComment], [prComment], [reviewComment, prComment]].map((comments) => ({ comments })))(
+      '通常コミット・PR・空出力は判定述語で変わらない: %#',
+      ({ comments }) => {
+        expect(exportJson(comments, new Map(), '', 'fix', () => true)).toBe(exportJson(comments, new Map()));
+        expect(exportMarkdown(comments, new Map(), '', 'fix', () => true)).toBe(exportMarkdown(comments, new Map()));
+        expect(exportMarkdown(comments, new Map(), '', 'fix', () => true)).not.toMatch(/内容が変更済み|書き換え済み/u);
+        expect(JSON.parse(exportJson(comments, new Map()))).not.toHaveProperty('uncommittedSnapshots');
+      },
+    );
+    it('同じ repo・SHA の通常コミットと未コミットを別グループにする', () => {
+      const markdown = exportMarkdown([reviewComment, staged], new Map());
+      expect(markdown.match(/^### .*$/gm)).toEqual([
+        `### コミット ${reviewComment.commit}`,
+        '### 未コミットの変更（ステージ済み）',
+      ]);
+      expect(JSON.parse(exportJson([reviewComment, staged], new Map()))).toMatchObject({
+        uncommittedSnapshots: [expect.objectContaining({ snapshot: staged.commit })],
+      });
+    });
+    it.each([
+      { ...staged, repoRoot: '/other' },
+      { ...staged, uncommitted: { ...staged.uncommitted, createdAt: '2026-11-15T00:00:00Z' } },
+      { ...staged, uncommitted: { ...staged.uncommitted, head: 'f'.repeat(40) } },
+      unstaged,
+    ])('同じ SHA でもリポジトリ・日時・HEAD・区分が違う取得を区別する: %#', (other) => {
+      const comments = [staged, other];
+      const markdown = exportMarkdown(comments, new Map());
+      expect(markdown.match(/^### 未コミット.*$/gm)).toHaveLength(2);
+      expect(markdown.match(/^基準の HEAD: .*$/gm)).toEqual(
+        comments.map((comment) => `基準の HEAD: ${comment.uncommitted.head}`),
+      );
+      expect(markdown.match(/^スナップショットの作成日時: .*$/gm)).toEqual(
+        comments.map((comment) => `スナップショットの作成日時: "${comment.uncommitted.createdAt}"`),
+      );
+      expect(JSON.parse(exportJson(comments, new Map()))).toMatchObject({
+        uncommittedSnapshots: comments.map((comment) => ({
+          repoRoot: comment.repoRoot,
+          snapshot: comment.commit,
+          ...comment.uncommitted,
+          changed: false,
+        })),
+      });
+    });
+    it('保存日時を Markdown では引用し、JSON では原文のまま保持する', () => {
+      const comment = { ...staged, uncommitted: { ...staged.uncommitted, createdAt: 'T\n## 偽`' } };
+      const markdown = exportMarkdown([comment], new Map());
+      expect(markdown).toContain('スナップショットの作成日時: "T\\n## 偽\\u0060"');
+      expect(markdown).not.toMatch(/^## 偽/mu);
+      expect(JSON.parse(exportJson([comment], new Map()))).toMatchObject({
+        uncommittedSnapshots: [{ createdAt: comment.uncommitted.createdAt }],
+      });
+    });
+    it('リポジトリが交互に現れても両形式の対象の順序を揃える', () => {
+      const comments = [
+        staged,
+        { ...unstaged, repoRoot: '/other', commit: 'e'.repeat(40) },
+        { ...unstaged, commit: 'f'.repeat(40) },
+      ];
+      const snapshots = (
+        JSON.parse(exportJson(comments, new Map())) as { uncommittedSnapshots: { snapshot: string }[] }
+      ).uncommittedSnapshots;
+      expect(snapshots.map((snapshot) => `スナップショット: ${snapshot.snapshot}`)).toEqual(
+        exportMarkdown(comments, new Map()).match(/^スナップショット: .*$/gm),
+      );
+    });
+    it('解決済みのファイルコメントには行番号や diff を付けない', () => {
+      const comment = { ...staged, side: 'file' as const, startLine: 0, endLine: 0, resolved: true };
+      const markdown = exportMarkdown([comment], new Map());
+      expect(markdown).toContain('位置: ファイル全体');
+      expect(markdown).toContain('解決状態: 解決済み');
+      expect(markdown).not.toContain('```diff');
+    });
+    it.each(['markdown', 'json'] as const)('未コミット範囲を request と対話で選べる: %s', async (format) => {
+      const access = await accessFor((await repository()).directory);
+      const saved = [staged, { ...unstaged, id: 'resolved', resolved: true }];
+      const comments = [reviewComment, prComment, ...saved];
+      for (const interactive of [false, true]) {
+        if (interactive) {
+          pick
+            .mockResolvedValueOnce({ scope: 'uncommitted' })
+            .mockResolvedValueOnce({ format })
+            .mockResolvedValueOnce({ purpose: 'fix' });
+        }
+        await exportComments(comments, access, interactive ? {} : { request: { scope: 'uncommitted', format } });
+        const output = docs.at(-1)!.getText();
+        if (format === 'json') {
+          expect((JSON.parse(output) as { comments: unknown[] }).comments).toEqual(saved);
+        } else {
+          expect(output.match(/^### .*$/gm)).toEqual([
+            '### 未コミットの変更（ステージ済み）',
+            '### 未コミットの変更（未ステージ）',
+          ]);
+          expect(output).toContain('解決状態: 解決済み');
+        }
+        expect(env.clipboard.writeText).toHaveBeenLastCalledWith(output);
+      }
+      expect(pick.mock.calls[0]?.[0]).toEqual([
+        { label: '全コメント', scope: 'all' },
+        { label: '特定のコミット', scope: 'commit' },
+        { label: '特定の PR', scope: 'pullRequest' },
+        { label: '未コミットの変更', scope: 'uncommitted' },
+        { label: '未解決のみ', scope: 'unresolved' },
+      ]);
+    });
+    it.each(['markdown', 'json'] as const)('未コミットが 0 件なら空出力を保つ: %s', async (format) => {
+      const access = await accessFor((await repository()).directory);
+      await exportComments([reviewComment, prComment], access, { request: { scope: 'uncommitted', format } });
+      const output = docs.at(-1)!.getText();
+      if (format === 'markdown') {
+        expect(output).toContain('コメントはありません。');
+      } else {
+        expect(JSON.parse(output)).toMatchObject({ comments: [], instructions: DEFAULT_FIX_COMMIT_INSTRUCTIONS });
+        expect(JSON.parse(output)).not.toHaveProperty('uncommittedSnapshots');
+      }
+    });
+    it('通常コミットの候補と結果から同じ SHA の未コミットと PR を除く', async () => {
+      const access = await accessFor((await repository()).directory);
+      pick
+        .mockResolvedValueOnce({ scope: 'commit' })
+        .mockResolvedValueOnce({ commit: reviewComment.commit, repoRoot: '/repo' })
+        .mockResolvedValueOnce({ format: 'json' })
+        .mockResolvedValueOnce({ purpose: 'fix' });
+      await exportComments([prComment, staged, reviewComment], access);
+      expect(pick.mock.calls[1]?.[0]).toEqual([
+        {
+          label: `${shortHash(reviewComment.commit)} ${reviewComment.subject}`,
+          description: '/repo',
+          commit: reviewComment.commit,
+          repoRoot: '/repo',
+        },
+      ]);
+      expect((JSON.parse(docs.at(-1)!.getText()) as { comments: unknown[] }).comments).toEqual([reviewComment]);
+    });
+    it('未コミットしかなければ通常コミットの候補は空で、キャンセルで出力しない', async () => {
+      const access = await accessFor((await repository()).directory);
+      pick.mockResolvedValueOnce({ scope: 'commit' }).mockResolvedValueOnce(undefined);
+      await exportComments([staged], access);
+      expect(pick.mock.calls[1]?.[0]).toEqual([]);
+      expect(docs).toEqual([]);
+      expect(env.clipboard.writeText).not.toHaveBeenCalled();
+    });
+    it.each([
+      [{ scope: 'uncommitted', format: 'json', purpose: 'question' }, true],
+      [{ scope: 'uncommitted', format: 'markdown' }, true],
+      [{ scope: 'uncommitted', format: 'Markdown' }, false],
+      [{ scope: 'uncommitted' }, false],
+      [{ scope: 'uncommitted', format: 'json', purpose: 'edit' }, false],
+    ])('新範囲の要求を検証する: %j', (request, expected) => {
+      expect(isExportRequest(request)).toBe(expected);
+    });
+  });
+  it('未コミットのコメントもMarkdownとJSONで出力でき、ラベルとメタデータを保持する', async () => {
+    const { directory } = await repository();
+    const uncommitted = { kind: 'unstaged' as const, createdAt: '2026-11-14T00:00:00Z' };
+    const saved = { ...reviewComment, repoRoot: directory, uncommitted };
+    const commit = targetFromComment(saved).commit;
+    const comment = { ...saved, subject: commit.subject, author: commit.author, date: commit.date };
+    const access = await accessFor(directory);
+    await exportComments([comment], access, { request: { scope: 'all', format: 'markdown' } });
+    expect(docs.at(-1)!.getText()).toContain('### 未コミットの変更（未ステージ）');
+    expect(docs.at(-1)!.getText()).toContain(`スナップショット: ${comment.commit}`);
+    expect(docs.at(-1)!.getText()).toContain(`スナップショットの作成日時: "${uncommitted.createdAt}"`);
+    expect(docs.at(-1)!.getText()).toContain('内容が変更済み: いいえ');
+    await exportComments([comment], access, { request: { scope: 'all', format: 'json' } });
+    const exported: unknown = JSON.parse(docs.at(-1)!.getText());
+    expect(exported).toMatchObject({ comments: [{ uncommitted, author: '', date: uncommitted.createdAt }] });
+  });
   describe('コミットのエクスポート', () => {
     async function fixture() {
       const { directory } = await repository();

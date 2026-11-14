@@ -462,6 +462,40 @@ export class GitClient {
       commonDir: resolve(this.root, commonDir.replace(/\r?\n$/, '')),
     };
   }
+  async ignoredPaths(paths: readonly string[]): Promise<Set<string>> {
+    if (!paths.length) {
+      return new Set();
+    }
+    let output: Buffer;
+    try {
+      // check-ignore は literal pathspec magic を受け付けない。
+      output = await runGit(
+        this.root,
+        ['--no-literal-pathspecs', 'check-ignore', '--no-index', '-z', '--stdin'],
+        paths.join('\0') + '\0',
+      );
+    } catch (error) {
+      if (error instanceof GitError && error.exitCode === 1) {
+        return new Set();
+      }
+      throw error;
+    }
+    const ignored = output.toString('utf8').split('\0').filter(Boolean);
+    const specs = [...new Set(ignored.map((path) => path.split('/', 1)[0]!))];
+    const pathspecs =
+      specs.reduce((size, spec) => size + Buffer.byteLength(spec) + 1, 0) <= PATHSPEC_BATCH_MAX_BYTES
+        ? ['--', ...specs]
+        : [];
+    const tracked = new Set<string>();
+    for (const file of (await this.text(['ls-files', '-c', '-z', '-i', '--exclude-standard', ...pathspecs])).split(
+      '\0',
+    )) {
+      for (let end = file.length; end > 0; end = file.lastIndexOf('/', end - 1)) {
+        tracked.add(file.slice(0, end));
+      }
+    }
+    return new Set(ignored.filter((path) => !tracked.has(path)));
+  }
   async head(): Promise<string | undefined> {
     try {
       return (await this.text(['rev-parse', '--verify', '--quiet', 'HEAD'])).trim();

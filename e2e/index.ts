@@ -470,5 +470,103 @@ export async function run(): Promise<void> {
     assert.ok(!current.some((node) => node.kind === 'commit' && node.commit.hash === latestMain.commit.hash));
     return true;
   }, 'worktree の外部 amend が自動でコミット一覧に反映されませんでした');
+  await writeFile(resultFile, JSON.stringify({ status: 'started', step: 'uncommitted files' }));
+  await writeFile(
+    join(latestMain.repo, 'lib.ts'),
+    'export function greet(name: string): string { return name.trim(); }\n',
+  );
+  await runGit(latestMain.repo, ['add', 'lib.ts']);
+  const working = "import { greet } from './lib';\nconst name = 'uncommitted';\nconsole.log(greet(name));\n";
+  await writeFile(join(latestMain.repo, 'main.ts'), working);
+  await writeFile(join(latestMain.repo, 'untracked.ts'), 'export const untracked = true;\n');
+  await writeFile(join(latestMain.repo, 'node_modules/ignored-out.js'), 'ignored\n');
+  await vscode.commands.executeCommand('vsreview.showFileList');
+  const unstagedMain = await poll(async () => {
+    const root = (await api.commitsTree.getChildren())[0];
+    if (root?.kind !== 'uncommitted') {
+      return undefined;
+    }
+    const groups = await api.commitsTree.getChildren(root);
+    const staged = groups.find((node) => node.kind === 'uncommittedGroup' && node.change.kind === 'staged');
+    const unstaged = groups.find((node) => node.kind === 'uncommittedGroup' && node.change.kind === 'unstaged');
+    if (!staged || !unstaged) {
+      return undefined;
+    }
+    const stagedFiles = await api.commitsTree.getChildren(staged);
+    const unstagedFiles = await api.commitsTree.getChildren(unstaged);
+    if (
+      !stagedFiles.some((node) => node.kind === 'file' && node.file.path === 'lib.ts' && node.file.status === 'M') ||
+      !unstagedFiles.some(
+        (node) => node.kind === 'file' && node.file.path === 'untracked.ts' && node.file.status === 'A',
+      )
+    ) {
+      return undefined;
+    }
+    assert.equal(api.commitsTree.getTreeItem(root).label, '未コミットの変更');
+    assert.ok(
+      [...stagedFiles, ...unstagedFiles].every(
+        (node) => node.kind !== 'file' || !node.file.path.startsWith('node_modules/'),
+      ),
+    );
+    return unstagedFiles.find(
+      (node) => node.kind === 'file' && node.file.path === 'main.ts' && node.file.status === 'M',
+    );
+  }, '未コミットの区分とファイルが自動更新されませんでした');
+  await writeFile(resultFile, JSON.stringify({ status: 'started', step: 'uncommitted comment' }));
+  await vscode.commands.executeCommand('vsreview.openDiff', unstagedMain);
+  await vscode.commands.executeCommand('workbench.action.compareEditor.focusPrimarySide');
+  const uncommittedEditor = vscode.window.activeTextEditor;
+  assert.ok(uncommittedEditor);
+  uncommittedEditor.selection = new vscode.Selection(2, 0, 2, uncommittedEditor.document.lineAt(2).text.length);
+  const uncommittedDraft = await createCommentInput();
+  await clickCommentInput(uncommittedDraft.uri);
+  const uncommittedBody = '未ステージの3行目を確認してください';
+  await vscode.commands.executeCommand('type', { text: uncommittedBody });
+  await poll(
+    () => Promise.resolve(uncommittedDraft.getText() === uncommittedBody ? true : undefined),
+    '未ステージのコメントを入力できませんでした',
+  );
+  await vscode.commands.executeCommand('editor.action.submitComment');
+  const uncommittedComment = await poll(
+    () => Promise.resolve(api.comments.all.find((comment) => comment.body === uncommittedBody)),
+    '未ステージのコメントを保存できませんでした',
+  );
+  assert.equal(uncommittedComment.uncommitted?.kind, 'unstaged');
+  assert.equal(uncommittedComment.startLine, 3);
+  const tabBeforeEdit = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  assert.ok(tabBeforeEdit instanceof vscode.TabInputTextDiff);
+  await writeFile(resultFile, JSON.stringify({ status: 'started', step: 'uncommitted changed' }));
+  await writeFile(join(latestMain.repo, 'main.ts'), working.replace('uncommitted', 'edited after comment'));
+  await poll(
+    () =>
+      Promise.resolve(
+        String(api.commentsTree.getTreeItem({ kind: 'comment', comment: uncommittedComment }).description).includes(
+          '内容が変更済み',
+        )
+          ? true
+          : undefined,
+      ),
+    '未コミットの変更済み表示が自動更新されませんでした',
+  );
+  const tabAfterEdit = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  assert.ok(tabAfterEdit instanceof vscode.TabInputTextDiff);
+  assert.equal(tabAfterEdit.original.toString(), tabBeforeEdit.original.toString());
+  assert.equal(tabAfterEdit.modified.toString(), tabBeforeEdit.modified.toString());
+  await vscode.commands.executeCommand('vsreview.exportComments', { scope: 'uncommitted', format: 'markdown' });
+  const uncommittedOutput = vscode.window.activeTextEditor?.document;
+  assert.ok(uncommittedOutput?.isUntitled);
+  const uncommittedText = uncommittedOutput.getText();
+  assert.ok(uncommittedText.includes('### 未コミットの変更（未ステージ）'));
+  assert.ok(uncommittedText.includes('内容が変更済み: はい'));
+  assert.ok(uncommittedText.includes('未コミットのコメントに対して:'));
+  assert.ok(!uncommittedText.includes('fixup'));
+  assert.equal(await vscode.env.clipboard.readText(), uncommittedText);
+  await vscode.commands.executeCommand('vsreview.openComment', uncommittedComment);
+  const savedDiff = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  assert.ok(savedDiff instanceof vscode.TabInputTextDiff);
+  assert.equal((await api.resolveDocumentRef(savedDiff.modified))?.commit.hash, uncommittedComment.commit);
+  await waitForActiveEditor(savedDiff.modified, '保存時点の差分が開きませんでした');
+  assert.equal(vscode.window.activeTextEditor?.selection.start.line, 2);
+  assert.equal((await vscode.workspace.openTextDocument(savedDiff.modified)).getText(), working);
   await writeFile(resultFile, JSON.stringify({ status: 'passed' }));
 }

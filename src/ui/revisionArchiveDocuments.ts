@@ -1,9 +1,8 @@
 import { selectReviewTarget, isWorkingTreeUri, type ResolveOptions } from './reviewTargets';
 import * as vscode from 'vscode';
-import { relative, sep } from 'node:path';
 import { comparisonKey } from '../core/comparisons';
 import { isDocumentRef, revisionRef, type DocumentRef } from '../core/documents';
-import { isWithin } from '../core/paths';
+import { isWithin, repoRelativePath } from '../core/paths';
 import { revisionUri, resolveDocumentRef } from './revisions';
 import { SerialQueue } from '../core/collections';
 import type { RevisionArchiveStore } from '../git/revisionArchiveStore';
@@ -120,7 +119,7 @@ export class RevisionArchiveDocuments {
     if (failed || !snapshot || !links || !this.access.isKnown(ref.repo) || !isWithin(root, uri.fsPath)) {
       return undefined;
     }
-    const path = relative(root, uri.fsPath).split(sep).join('/');
+    const path = repoRelativePath(root, uri.fsPath);
     return links?.some((link) => path === link || path.startsWith(`${link}/`)) ? undefined : path;
   }
   refs(uri: vscode.Uri): DocumentRef[] {
