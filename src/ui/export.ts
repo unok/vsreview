@@ -1,14 +1,14 @@
-import { selectComments, type ReviewComment } from '../core/model';
+import { selectComments, isCommitComment, type ReviewComment } from '../core/model';
 import { commitKey, reviewGroupKey } from '../core/comparisons';
 import * as vscode from 'vscode';
 import { groupBy } from '../core/collections';
-import { shortHash, escapeIcons, replaceDisplayControls } from '../core/presentation';
+import { shortHash, escapeIcons, replaceDisplayControls, UNCOMMITTED_LABEL } from '../core/presentation';
 import { exportMarkdown, exportJson, UNKNOWN_VALUE, type ExportPurpose } from '../core/export';
 import { isRecord, isPositiveInteger } from '../core/validation';
 import { showError, showStatus } from './common';
 import type { RepositoryAccess } from './repositories';
 export interface ExportRequest {
-  scope: 'all' | 'unresolved' | 'pullRequest';
+  scope: 'all' | 'unresolved' | 'pullRequest' | 'uncommitted';
   pullRequest?: number;
   repoRoot?: string;
   purpose?: ExportPurpose;
@@ -19,6 +19,7 @@ export function isExportRequest(value: unknown): value is ExportRequest {
     isRecord(value) &&
     (value.scope === 'all' ||
       value.scope === 'unresolved' ||
+      value.scope === 'uncommitted' ||
       (value.scope === 'pullRequest' && isPositiveInteger(value.pullRequest) && typeof value.repoRoot === 'string')) &&
     (value.purpose === undefined || value.purpose === 'fix' || value.purpose === 'question') &&
     (value.format === 'markdown' || value.format === 'json')
@@ -27,7 +28,15 @@ export function isExportRequest(value: unknown): value is ExportRequest {
 export async function exportComments(
   comments: readonly ReviewComment[],
   access: RepositoryAccess,
-  { currentRepo, request }: { currentRepo?: string | undefined; request?: ExportRequest | undefined } = {},
+  {
+    currentRepo,
+    request,
+    rewritten,
+  }: {
+    currentRepo?: string | undefined;
+    request?: ExportRequest | undefined;
+    rewritten?: (comment: ReviewComment) => boolean;
+  } = {},
 ): Promise<void> {
   const scope =
     request ??
@@ -36,6 +45,7 @@ export async function exportComments(
         { label: '全コメント', scope: 'all' },
         { label: '特定のコミット', scope: 'commit' },
         { label: '特定の PR', scope: 'pullRequest' },
+        { label: UNCOMMITTED_LABEL, scope: 'uncommitted' },
         { label: '未解決のみ', scope: 'unresolved' },
       ],
       { title: 'エクスポート範囲' },
@@ -44,14 +54,12 @@ export async function exportComments(
     return;
   }
   let selected = selectComments(comments, { unresolvedOnly: scope.scope === 'unresolved' });
+  if (scope.scope === 'uncommitted') {
+    selected = comments.filter((comment) => comment.uncommitted);
+  }
   if (scope.scope === 'commit') {
     const pick = await vscode.window.showQuickPick(
-      [
-        ...groupBy(
-          comments.filter((c) => !c.pullRequest),
-          commitKey,
-        ).values(),
-      ].flatMap((group) => {
+      [...groupBy(comments.filter(isCommitComment), commitKey).values()].flatMap((group) => {
         const c = group[0];
         return c
           ? [
@@ -69,10 +77,7 @@ export async function exportComments(
     if (!pick) {
       return;
     }
-    selected = selectComments(
-      comments.filter((c) => !c.pullRequest),
-      { commit: pick.commit, repoRoot: pick.repoRoot },
-    );
+    selected = selectComments(comments.filter(isCommitComment), { commit: pick.commit, repoRoot: pick.repoRoot });
   }
   if (scope.scope === 'pullRequest') {
     const pick =
@@ -151,8 +156,8 @@ export async function exportComments(
   const instructions = typeof value === 'string' ? value : '';
   const content =
     format === 'json'
-      ? exportJson(selected, branches, instructions, purpose)
-      : exportMarkdown(selected, branches, instructions, purpose);
+      ? exportJson(selected, branches, instructions, purpose, rewritten)
+      : exportMarkdown(selected, branches, instructions, purpose, rewritten);
   const doc = await vscode.workspace.openTextDocument({ content, language: format === 'json' ? 'json' : 'markdown' });
   await vscode.window.showTextDocument(doc);
   await vscode.env.clipboard.writeText(content);

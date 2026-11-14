@@ -27,6 +27,9 @@ export interface ReviewComment {
   author: string;
   date: string;
 }
+export function isCommitComment(comment: Pick<ReviewComment, 'pullRequest' | 'uncommitted'>): boolean {
+  return !comment.pullRequest && !comment.uncommitted;
+}
 interface SavedComments {
   version: 1;
   comments: ReviewComment[];

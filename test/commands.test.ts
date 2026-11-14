@@ -62,6 +62,77 @@ import {
 } from './vscodeMock';
 
 describe('commands', () => {
+  it('未コミットの変更済み判定を再取得せずにコマンドの両形式へ渡す', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'file'), 'saved');
+    const snapshot = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const saved = {
+      ...reviewComment,
+      repoRoot: directory,
+      commit: snapshot.unstaged.commit.hash,
+      parent: snapshot.unstaged.parent,
+      path: 'file',
+      status: 'A' as const,
+      side: 'file' as const,
+      startLine: 0,
+      endLine: 0,
+      uncommitted: { kind: 'unstaged' as const, createdAt: snapshot.createdAt },
+    };
+    delete saved.oldPath;
+    const state = new MemoryState();
+    state.value = serialize([saved]);
+    const access = await accessFor(directory);
+    const documents = reviewDocuments(access);
+    const comments = new ReviewComments(state, () => {}, documents, access, { review: () => undefined });
+    const changed = new ChangedFiles(access);
+    const commitsTree = new CommitsTree(() => comments.all, access, changed);
+    const capture = vi.fn(() => createUncommittedChanges(git, '2026-11-15T00:00:00Z'));
+    const rewritten = new RewrittenComments(
+      () => Promise.resolve(comments.all),
+      access,
+      { latestHead: () => undefined },
+      capture,
+    );
+    const filesTree = FilesTree.register(documents, access, revisionSnapshots(access, changed), archiveLease);
+    const pullRequestsTree = registerPullRequestsTree(commitsTree, changed, { comments: () => comments.all });
+    for (const resource of [comments, commitsTree, rewritten, filesTree, pullRequestsTree]) {
+      disposeAfter(resource);
+    }
+    registerReviewCommands(extensionContext(), {
+      archives: revisionArchives(access),
+      filesTree,
+      documents,
+      comments,
+      commitsTree,
+      rewritten,
+      access,
+      pullRequestsTree,
+      pullRequestCommands: pullRequestCommandsFor(pullRequestsTree),
+      diff: new ReviewDiff(
+        documents,
+        access,
+        changed,
+        { gh: unexpectedGh, remote: () => 'origin' },
+        { review: () => undefined },
+        archiveLease,
+      ),
+    });
+    await writeFile(join(directory, 'file'), 'edited');
+    await rewritten.refresh();
+    expect(rewritten.has(saved)).toBe(true);
+    expect(capture).toHaveBeenCalledTimes(1);
+    for (const format of ['json', 'markdown']) {
+      await commands.executeCommand('vsreview.exportComments', { scope: 'uncommitted', format });
+      const output = docs.at(-1)!.getText();
+      if (format === 'json') {
+        expect(JSON.parse(output)).toMatchObject({ comments: [saved], uncommittedSnapshots: [{ changed: true }] });
+      } else {
+        expect(output).toContain('内容が変更済み: はい');
+      }
+      expect(env.clipboard.writeText).toHaveBeenLastCalledWith(output);
+    }
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
   async function uncommittedFixture() {
     const { directory, git } = await repository();
     await writeFile(join(directory, 'a.ts'), 'one\ntwo\nthree\nfour\nfive\n');
@@ -425,6 +496,9 @@ describe('commands', () => {
       { scope: 'other', format: 'json' },
       { scope: 'commit', format: 'json' },
       { scope: 'all', format: 'Markdown' },
+      { scope: 'uncommitted', format: 'Markdown' },
+      { scope: 'uncommitted' },
+      { scope: 'uncommitted', format: 'json', purpose: 'edit' },
       { scope: 'all' },
       { format: 'json' },
       { scope: undefined },

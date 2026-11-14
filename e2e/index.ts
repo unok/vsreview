@@ -552,6 +552,15 @@ export async function run(): Promise<void> {
   assert.ok(tabAfterEdit instanceof vscode.TabInputTextDiff);
   assert.equal(tabAfterEdit.original.toString(), tabBeforeEdit.original.toString());
   assert.equal(tabAfterEdit.modified.toString(), tabBeforeEdit.modified.toString());
+  await vscode.commands.executeCommand('vsreview.exportComments', { scope: 'uncommitted', format: 'markdown' });
+  const uncommittedOutput = vscode.window.activeTextEditor?.document;
+  assert.ok(uncommittedOutput?.isUntitled);
+  const uncommittedText = uncommittedOutput.getText();
+  assert.ok(uncommittedText.includes('### 未コミットの変更（未ステージ）'));
+  assert.ok(uncommittedText.includes('内容が変更済み: はい'));
+  assert.ok(uncommittedText.includes('未コミットのコメントに対して:'));
+  assert.ok(!uncommittedText.includes('fixup'));
+  assert.equal(await vscode.env.clipboard.readText(), uncommittedText);
   await vscode.commands.executeCommand('vsreview.openComment', uncommittedComment);
   const savedDiff = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
   assert.ok(savedDiff instanceof vscode.TabInputTextDiff);
