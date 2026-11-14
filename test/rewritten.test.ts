@@ -17,6 +17,7 @@ import { ChangedFiles } from '../src/ui/repositories';
 import { window, activateTab, TabInputTextDiff } from './vscodeMock';
 import { GitClient, runGit } from '../src/git/client';
 import { CommentsTree } from '../src/ui/trees';
+import { targetFromComment } from '../src/core/documents';
 import { RewrittenComments } from '../src/ui/rewritten';
 import { describe, it, expect, vi } from 'vitest';
 import { writeFile } from 'node:fs/promises';
@@ -24,6 +25,36 @@ import { commitAll } from './gitFixtures';
 import { revisionUri } from '../src/ui/revisions';
 
 describe('rewritten', () => {
+  it('未コミットの保存コメントと開いた差分を到達不能でも書き換え済みにしない', async () => {
+    const { directory } = await repository();
+    const access = await accessFor(directory);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-14T00:00:30Z'));
+    const comment = {
+      ...reviewComment,
+      repoRoot: directory,
+      uncommitted: { kind: 'unstaged' as const, createdAt: '2026-11-14T00:00:00Z' },
+    };
+    const target = targetFromComment(comment);
+    activateTab(new TabInputTextDiff(revisionUri(target, 'old'), revisionUri(target, 'new')));
+    const documents = reviewDocuments(access);
+    const ordinary = { ...reviewComment, repoRoot: directory, commit: 'c'.repeat(40) };
+    const rewritten = new RewrittenComments(
+      async () => [comment, ordinary, ...(await documents.openDiffTargets())],
+      access,
+      { latestHead: () => undefined },
+    );
+    disposeAfter(rewritten);
+    await rewritten.refresh();
+    expect(rewritten.has(comment)).toBe(false);
+    expect(rewritten.has((await documents.openDiffTargets())[0]!)).toBe(false);
+    expect(rewritten.has(ordinary)).toBe(true);
+    const tree = new CommentsTree(() => [comment], rewritten);
+    disposeAfter(tree);
+    expect(tree.getTreeItem(tree.getChildren()[0]!).label).toBe(
+      `${basename(directory)} · 未コミットの変更（未ステージ） · たった今`,
+    );
+    expect(tree.getTreeItem(tree.getChildren()[0]!).description).toBe('1 コメント');
+  });
   describe('コミットの書き換え判定', () => {
     it('HEAD 到達可能・別ブランチのみ・書き換え・オブジェクト不在を区別する', async () => {
       const { directory, git } = await repository();

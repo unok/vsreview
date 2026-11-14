@@ -8,7 +8,7 @@ import { orderedFiles } from './fileView';
 import { commentRange } from './ranges';
 import type { ReviewComment } from '../core/model';
 import type { FileTarget } from '../core/documents';
-import { shortHash } from '../core/presentation';
+import { shortHash, uncommittedLabel } from '../core/presentation';
 import type { ReviewDocuments } from './documents';
 import { ChangedFiles, type RepositoryAccess } from './repositories';
 import { showInfo, showStatus } from './common';
@@ -60,7 +60,7 @@ export class ReviewDiff {
       'vscode.diff',
       left,
       right,
-      `${target.file.path} (${shortHash(target.commit.hash)})`,
+      `${target.file.path} (${target.uncommitted ? uncommittedLabel(target.uncommitted.kind) : shortHash(target.commit.hash)})`,
       { preview: true, ...(range && comment?.side === 'new' ? { selection: range } : {}) },
     );
     if (range && comment) {

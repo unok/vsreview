@@ -111,7 +111,12 @@ export function registerReviewCommands(
     }
   });
   command('openDiff', async (arg) => {
-    const target = await documents.targetFrom(arg);
+    const resolved = await documents.targetFrom(arg);
+    // ツリー選択では選択時の内容を固定し、URI の再表示では元のスナップショットを保つ。
+    const target =
+      isRecord(arg) && arg.kind === 'file' && resolved?.uncommitted
+        ? await commitsTree.refreshUncommitted(resolved)
+        : resolved;
     if (target) {
       await diff.openDiff(target);
       await comments.refresh();
@@ -122,7 +127,14 @@ export function registerReviewCommands(
   command('addFileComment', async (arg) => {
     const resolved = await documents.fileCommentTargetFrom(arg);
     if (resolved) {
-      await comments.addFileComment(resolved.target, resolved.document);
+      // 差分を開かずツリーからコメントする場合も、選択時の内容へ結び付ける。
+      const target =
+        isRecord(arg) && arg.kind === 'file' && resolved.target.uncommitted
+          ? await commitsTree.refreshUncommitted(resolved.target)
+          : resolved.target;
+      if (target) {
+        await comments.addFileComment(target, resolved.document);
+      }
     }
   });
   command('openWorkingFile', async () => {

@@ -145,6 +145,7 @@ export class ReviewDocuments {
       commit: ref.commit.hash,
       parent: ref.parent,
       ...(ref.pullRequest ? { pullRequest: ref.pullRequest } : {}),
+      ...(ref.uncommitted ? { uncommitted: ref.uncommitted } : {}),
     }));
   }
   async fileCommentTargetFrom(
@@ -197,6 +198,10 @@ export class ReviewDocuments {
   }
 
   private async sideUri(ref: DocumentRef): Promise<vscode.Uri> {
+    // 作業ツリーの編集や展開設定にかかわらず、選択時のスナップショットを固定表示する。
+    if (ref.uncommitted) {
+      return revisionUri(ref, ref.side);
+    }
     if (!ref.empty) {
       // 旧側は作業ツリーの編集から隔離し、履歴の表示内容を固定する。
       if (ref.side === 'new' && (await this.matchesWorkingTree(ref))) {

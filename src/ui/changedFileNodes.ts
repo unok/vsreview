@@ -71,8 +71,14 @@ export class ChangedFileNodes {
     return item;
   }
   fileNodes(nodes: readonly FileTreeNode[], target: CommitTarget): ChangedFileNode[] {
-    const { repo, commit, parent, pullRequest } = target;
-    const comparison = { repo, commit, parent, ...(pullRequest ? { pullRequest } : {}) };
+    const { repo, commit, parent, pullRequest, uncommitted } = target;
+    const comparison = {
+      repo,
+      commit,
+      parent,
+      ...(pullRequest ? { pullRequest } : {}),
+      ...(uncommitted ? { uncommitted } : {}),
+    };
     return nodes.map((node) =>
       node.kind === 'file'
         ? { ...comparison, kind: 'file', name: node.name, file: node.file }

@@ -1,5 +1,6 @@
 import {
   reviewDocuments,
+  revisionArchives,
   pullRequestReview,
   repository,
   accessFor,
@@ -13,15 +14,77 @@ import type * as vscode from 'vscode';
 import { textDocument, window, activateTab, TabInputTextDiff, TabInputText, docs, Uri } from './vscodeMock';
 import { CommitsTree } from '../src/ui/trees';
 import { GitClient } from '../src/git/client';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { writeFile, unlink, symlink, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { commitAll } from './gitFixtures';
-import { AMBIGUOUS_REVIEW_TARGET, CONTENT_CACHE_LIMIT } from '../src/ui/documents';
+import { ReviewDocuments, AMBIGUOUS_REVIEW_TARGET, CONTENT_CACHE_LIMIT } from '../src/ui/documents';
 import { revisionUri, documentRef, RevisionProvider } from '../src/ui/revisions';
 import { targetFromComment, isFileTarget, revisionRef } from '../src/core/documents';
+import { createUncommittedChanges } from '../src/git/uncommitted';
 
 describe('documents', () => {
+  it('未コミットURIはメタデータを検証し、保存後も同じ固定本文へ復元する', async () => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a.ts'), 'before\n');
+    await commitAll(directory, 'base');
+    await writeFile(join(directory, 'a.ts'), 'snapshot\n');
+    const changes = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
+    const target = {
+      repo: directory,
+      ...changes.unstaged,
+      file: changes.unstaged.files[0]!,
+      uncommitted: {
+        kind: 'unstaged' as const,
+        ...(changes.head ? { head: changes.head } : {}),
+        createdAt: changes.createdAt,
+      },
+    };
+    const access = await accessFor(directory);
+    const archives = revisionArchives(access);
+    const expand = vi.spyOn(archives, 'uri').mockResolvedValue(Uri.file('/expanded') as vscode.Uri);
+    const documents = new ReviewDocuments(access, archives);
+    const pair = await documents.diffUris(target);
+    expect([pair.left.scheme, pair.right.scheme]).toEqual(['vsreview', 'vsreview']);
+    expect(expand).not.toHaveBeenCalled();
+    await writeFile(join(directory, 'a.ts'), 'later\n');
+    const provider = new RevisionProvider(access);
+    expect(await provider.provideTextDocumentContent(pair.left)).toBe('before\n');
+    expect(await provider.provideTextDocumentContent(pair.right)).toBe('snapshot\n');
+    const ref = documentRef(pair.right)!;
+    expect(ref.uncommitted).toEqual(target.uncommitted);
+    expect(ref.commit).toMatchObject({
+      subject: '未コミットの変更（未ステージ）',
+      author: '',
+      date: changes.createdAt,
+    });
+    for (const uncommitted of [
+      null,
+      {},
+      { kind: 'bad', createdAt: 'now' },
+      { kind: 'staged', head: 'bad', createdAt: 'now' },
+      { kind: 'staged' },
+    ]) {
+      const uri = Uri.from({
+        scheme: 'vsreview',
+        path: pair.right.path,
+        query: new URLSearchParams({ ref: JSON.stringify({ ...ref, uncommitted }) }).toString(),
+      }) as vscode.Uri;
+      expect(documentRef(uri)).toBeUndefined();
+    }
+    expect(isFileTarget({ ...target, pullRequest: pullRequestReview })).toBe(false);
+    const saved = {
+      ...reviewComment,
+      repoRoot: directory,
+      commit: ref.commit.hash,
+      parent: ref.parent,
+      path: ref.file.path,
+      status: ref.file.status,
+      uncommitted: target.uncommitted,
+    };
+    delete saved.oldPath;
+    expect(revisionUri(targetFromComment(saved), 'new').toString()).toBe(pair.right.toString());
+  });
   describe('コミットの文書', () => {
     async function fixture() {
       const { directory, git } = await repository();
