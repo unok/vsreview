@@ -53,18 +53,14 @@ export class AutoRefresh implements vscode.Disposable {
             new vscode.RelativePattern(vscode.Uri.file(dir), pattern),
           );
           const request = (uri: vscode.Uri): void => {
+            if (pattern === '**') {
+              this.requestWorkingTreeRefresh(root, generation, uri.fsPath);
+              return;
+            }
             if (generation === this.generation && !this.disposed) {
-              if (pattern === '**' || pattern === 'index') {
-                const path = repoRelativePath(root, uri.fsPath);
-                if (pattern === '**' && (!isWithin(root, uri.fsPath) || path.split('/').includes('.git'))) {
-                  return;
-                }
+              if (pattern === 'index') {
                 const change = this.changes.get(root) ?? { index: false, paths: new Set<string>() };
-                if (pattern === 'index') {
-                  change.index = true;
-                } else {
-                  change.paths.add(path);
-                }
+                change.index = true;
                 this.changes.set(root, change);
               } else {
                 this.history = true;
@@ -79,6 +75,11 @@ export class AutoRefresh implements vscode.Disposable {
             watcher.onDidDelete(request),
           );
         }
+        this.watchers.push(
+          vscode.workspace.onDidSaveTextDocument((document) => {
+            this.requestWorkingTreeRefresh(root, generation, document.uri.fsPath);
+          }),
+        );
       } catch (error) {
         if (generation === this.generation && !this.disposed) {
           showError(error);
@@ -89,6 +90,19 @@ export class AutoRefresh implements vscode.Disposable {
       this.history = true;
       this.queue.request();
     }
+  }
+  private requestWorkingTreeRefresh(root: string, generation: number, fsPath: string): void {
+    if (generation !== this.generation || this.disposed) {
+      return;
+    }
+    const path = repoRelativePath(root, fsPath);
+    if (!isWithin(root, fsPath) || path.split('/').includes('.git')) {
+      return;
+    }
+    const change = this.changes.get(root) ?? { index: false, paths: new Set<string>() };
+    change.paths.add(path);
+    this.changes.set(root, change);
+    this.queue.request();
   }
   private async refresh(): Promise<void> {
     if (!this.enabled || this.disposed) {

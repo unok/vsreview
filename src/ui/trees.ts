@@ -51,6 +51,8 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
   private refreshing = false;
   private revision: string | undefined;
   private uncommitted: UncommittedChanges | undefined;
+  private captureSequence = 0;
+  private appliedCaptureSequence = 0;
   constructor(
     comments: () => readonly ReviewComment[],
     private readonly access: RepositoryAccess,
@@ -85,6 +87,7 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
         return;
       }
       let changes: UncommittedChanges | undefined;
+      const captureSequence = ++this.captureSequence;
       try {
         changes = git ? await (options.captureUncommitted ?? this.captureUncommitted)(git) : undefined;
       } catch (error) {
@@ -97,6 +100,9 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
         return;
       }
       if (previousRoot === git?.root && revision === this.revision) {
+        if (captureSequence < this.appliedCaptureSequence) {
+          return;
+        }
         if (
           options.onlyIfChanged &&
           this.uncommitted?.head === changes?.head &&
@@ -106,6 +112,7 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
           return;
         }
         this.uncommitted = changes;
+        this.appliedCaptureSequence = captureSequence;
         this.rerender();
         return;
       }
@@ -117,7 +124,10 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
         return;
       }
       this.repository = git;
-      this.uncommitted = changes;
+      if (captureSequence > this.appliedCaptureSequence) {
+        this.uncommitted = changes;
+        this.appliedCaptureSequence = captureSequence;
+      }
       this.revision = revision;
       this.more = commits.length > count;
       this.commits = commits.slice(0, count);
@@ -137,6 +147,7 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
       return target;
     }
     const generation = this.refreshGeneration;
+    const captureSequence = ++this.captureSequence;
     let changes: UncommittedChanges;
     try {
       changes = await this.captureUncommitted(this.access.client(target.repo));
@@ -147,9 +158,11 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
     if (
       target.repo === this.selected?.root &&
       target.repo === this.git?.root &&
-      generation === this.refreshGeneration
+      generation === this.refreshGeneration &&
+      captureSequence > this.appliedCaptureSequence
     ) {
       this.uncommitted = changes;
+      this.appliedCaptureSequence = captureSequence;
       this.rerender();
     }
     const change = changes[target.uncommitted.kind];

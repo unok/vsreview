@@ -17,6 +17,8 @@ import { join } from 'node:path';
 import { shortHash } from '../src/core/presentation';
 import {
   emitFileEvent,
+  documentSaved,
+  textDocument,
   activateTab,
   globalConfiguration,
   TabInputTextDiff,
@@ -82,6 +84,78 @@ describe('autoRefresh', () => {
     }
     return { ...f, auto, capture, completed, update, comment };
   }
+  it.each([false, true])('保存イベントで一覧と変更済み判定を更新する: 監視との重複=%s', async (duplicate) => {
+    const { directory, git, commits, rewritten, capture, completed, comment } = await uncommittedFixture();
+    await writeFile(join(directory, 'file'), 'edited');
+    const doc = textDocument(Uri.file(join(directory, 'file')) as vscode.Uri, 'edited');
+    vi.useFakeTimers();
+    if (duplicate) {
+      emitFileEvent(doc.uri.fsPath);
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    documentSaved.fire(doc);
+    await vi.advanceTimersByTimeAsync(299);
+    expect(capture).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    vi.useRealTimers();
+    await waitFor(() => expect(completed).toHaveBeenCalledTimes(2));
+    expect(capture).toHaveBeenCalledTimes(1);
+    const current = await createUncommittedChanges(git, '2026-11-15T00:00:00Z');
+    expect((await commits.getChildren())[0]).toMatchObject({
+      kind: 'uncommitted',
+      changes: { unstaged: { commit: { hash: current.unstaged.commit.hash } } },
+    });
+    expect(rewritten.has(comment)).toBe(true);
+  });
+  it('保存でも管理領域・ルート外・無視ファイルを除外する', async () => {
+    const { directory, capture, completed } = await uncommittedFixture();
+    await writeFile(join(directory, '.gitignore'), 'dist/\n');
+    const ignored = vi.spyOn(GitClient.prototype, 'ignoredPaths');
+    vi.useFakeTimers();
+    for (const path of ['.git', '.git/config', 'nested/.git/config', '../outside/file', 'dist/out.js']) {
+      documentSaved.fire(textDocument(Uri.file(join(directory, path)) as vscode.Uri, ''));
+    }
+    await vi.advanceTimersByTimeAsync(300);
+    vi.useRealTimers();
+    await waitFor(() => expect(ignored).toHaveResolvedWith(new Set(['dist/out.js'])));
+    expect(ignored.mock.calls).toEqual([[['dist/out.js']]]);
+    expect(capture).not.toHaveBeenCalled();
+    expect(completed).not.toHaveBeenCalled();
+    documentSaved.fire(textDocument(Uri.file(join(directory, 'file')) as vscode.Uri, 'saved'));
+    await waitFor(() => expect(completed).toHaveBeenCalledTimes(2));
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
+  it.each(['rewatch', 'disable', 'dispose'] as const)('保存イベントの登録を解除する: %s', async (action) => {
+    const { directory, auto, capture, completed } = await uncommittedFixture();
+    const registration = vi.spyOn(workspace, 'onDidSaveTextDocument');
+    await auto.rewatch({ refresh: false });
+    const subscription = registration.mock.results[0]!.value as vscode.Disposable;
+    const disposed = vi.spyOn(subscription, 'dispose');
+    const doc = textDocument(Uri.file(join(directory, 'file')) as vscode.Uri, 'saved');
+    vi.useFakeTimers();
+    documentSaved.fire(doc);
+    expect(vi.getTimerCount()).toBe(1);
+    if (action === 'dispose') {
+      auto.dispose();
+    } else {
+      if (action === 'disable') {
+        globalConfiguration.set('vsreview.autoRefresh', false);
+      }
+      await auto.rewatch({ refresh: false });
+    }
+    expect(disposed).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    documentSaved.fire(doc);
+    expect(vi.getTimerCount()).toBe(action === 'rewatch' ? 1 : 0);
+    await vi.advanceTimersByTimeAsync(300);
+    vi.useRealTimers();
+    if (action === 'rewatch') {
+      await waitFor(() => expect(completed).toHaveBeenCalledTimes(2));
+      expect(capture).toHaveBeenCalledTimes(1);
+    } else {
+      expect(capture).not.toHaveBeenCalled();
+    }
+  });
   it.each(['changed', 'created', 'deleted'] as const)('作業ツリーの%sを共有し履歴を再取得しない', async (kind) => {
     const { directory, git, commits, rewritten, capture, update, comment } = await uncommittedFixture();
     const log = vi.spyOn(GitClient.prototype, 'log');

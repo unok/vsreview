@@ -23,6 +23,51 @@ import { createUncommittedChanges } from '../src/git/uncommitted';
 import type { UncommittedChanges } from '../src/core/uncommitted';
 
 describe('trees', () => {
+  it.each([false, true])('reload待機中の新しいスナップショットを保つ: 履歴変更=%s', async (historyChanged) => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'a'), 'base');
+    await commitAll(directory, 'base');
+    await writeFile(join(directory, 'a'), 'first');
+    const access = await accessFor(directory);
+    const capture = vi.fn((client: GitClient) => createUncommittedChanges(client, '2026-11-14T00:00:00Z'));
+    const tree = new CommitsTree(() => [], access, new ChangedFiles(access), capture);
+    disposeAfter(tree);
+    await tree.select(git);
+    const root = (await tree.getChildren())[0]!;
+    const target = (await tree.getChildren((await tree.getChildren(root))[0]))[0]!;
+    if (root.kind !== 'uncommitted' || target.kind !== 'file') {
+      throw new Error('uncommitted file expected');
+    }
+    if (historyChanged) {
+      await gitAsAuthor(directory, ['commit', '--allow-empty', '-m', 'new head']);
+    }
+    const history = vi.fn();
+    tree.onDidChangeHistory(history);
+    let release!: (changes: UncommittedChanges) => void;
+    capture.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const pending = tree.reload({ onlyIfChanged: !historyChanged });
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    await writeFile(join(directory, 'a'), 'latest');
+    const latest = await tree.refreshUncommitted(target);
+    expect(latest?.commit.hash).not.toBe(root.changes.unstaged.commit.hash);
+    release(root.changes);
+    await pending;
+    expect((await tree.getChildren())[0]).toMatchObject({
+      kind: 'uncommitted',
+      changes: { unstaged: { commit: { hash: latest?.commit.hash } } },
+    });
+    expect(history).toHaveBeenCalledTimes(historyChanged ? 1 : 0);
+    if (historyChanged) {
+      expect((await tree.getChildren())[1]).toMatchObject({ commit: { subject: 'new head', hash: await git.head() } });
+      await tree.reload({ onlyIfChanged: true });
+      expect(history).toHaveBeenCalledTimes(1);
+    }
+  });
   it('未コミットを区分・SHA・ファイルでまとめ、日時・変更済み・抜粋とメニューを表示する', async () => {
     const { directory, git } = await repository();
     const current = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');

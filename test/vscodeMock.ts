@@ -115,6 +115,7 @@ export const pick = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 export const documentOpened = new EventEmitter<VSCode.TextDocument>();
 export const documentClosed = new EventEmitter<VSCode.TextDocument>();
 export const documentChanged = new EventEmitter<VSCode.TextDocumentChangeEvent>();
+export const documentSaved = new EventEmitter<VSCode.TextDocument>();
 export const editorChanged = new EventEmitter<VSCode.TextEditor | undefined>();
 export const tabsChanged = new EventEmitter<unknown>();
 export const tabGroupsChanged = new EventEmitter<unknown>();
@@ -273,6 +274,7 @@ export const workspace = {
   onDidOpenTextDocument: documentOpened.event,
   onDidCloseTextDocument: documentClosed.event,
   onDidChangeTextDocument: documentChanged.event,
+  onDidSaveTextDocument: documentSaved.event,
   openTextDocument: async (value: VSCode.Uri | { content: string; language: string }): Promise<VSCode.TextDocument> => {
     if ('content' in value) {
       const doc = textDocument(Uri.from({ scheme: 'untitled', path: `/${docs.length}` }) as VSCode.Uri, value.content);
@@ -425,6 +427,7 @@ export function resetVscode(): void {
   documentOpened.dispose();
   documentClosed.dispose();
   documentChanged.dispose();
+  documentSaved.dispose();
   editorChanged.dispose();
   tabsChanged.dispose();
   tabGroupsChanged.dispose();
