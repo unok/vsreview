@@ -8,3 +8,4 @@ coverage/
 !.takt/workflows/
 !.takt/steps/
 !.takt/facets/
+pnpm-lock.yaml
