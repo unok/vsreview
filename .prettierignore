@@ -3,6 +3,8 @@ dist/
 .scratch/
 *.vsix
 coverage/
-.takt/.runtime/
-.takt/runs/
-.takt/quality-gates/
+.takt/*
+!.takt/config.yaml
+!.takt/workflows/
+!.takt/steps/
+!.takt/facets/
