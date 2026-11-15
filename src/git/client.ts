@@ -648,7 +648,7 @@ export class GitClient {
       }
       const head = await this.head();
       if (!head) {
-        throw new Error('HEAD が存在しません');
+        throw new Error('HEAD が存在しません', { cause: error });
       }
       return { head };
     }

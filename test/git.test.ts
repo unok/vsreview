@@ -319,6 +319,20 @@ describe('git', () => {
       await runGit(directory, ['checkout', '--detach', commitInfo.hash]);
       expect(await git.branch()).toEqual({ head: commitInfo.hash });
     });
+    it('ブランチも HEAD もなければ、symbolic-ref の失敗を原因として返す', async () => {
+      const { directory, git } = await repository();
+      await writeFile(join(directory, 'file'), 'initial\n');
+      await commitAll(directory, 'initial');
+      await runGit(directory, ['checkout', '--detach']);
+      // detached では symbolic-ref が終了コード 1 で失敗する。rev-parse --verify HEAD は存在しないオブジェクトでも
+      // 成功し、HEAD が読めない状態は実リポジトリで作れないため、HEAD の取得結果だけを差し替える。
+      vi.spyOn(git, 'head').mockResolvedValueOnce(undefined);
+      const error = await git.branch().catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('HEAD が存在しません');
+      expect((error as Error).cause).toBeInstanceOf(GitError);
+      expect(((error as Error).cause as GitError).exitCode).toBe(1);
+    });
 
     it('差し替え用のGit環境変数を除去して検出先を固定し、ロケールをCにする', async () => {
       const other = await repository();
