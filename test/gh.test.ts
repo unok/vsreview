@@ -5,7 +5,7 @@ import {
   pullRequestRepository,
   gitProcesses,
 } from './fixtures';
-import { PULL_REQUEST_FIELDS } from '../src/core/pullRequests';
+import { PULL_REQUEST_FIELDS, PULL_REQUEST_REVISION_CHANGED } from '../src/core/pullRequests';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -187,14 +187,31 @@ describe('gh', () => {
       await commitAll(source, 'force');
       const latest = (await sourceGit.head())!;
       await runGit(source, ['push', '--force', 'origin', `${latest}:refs/pull/12/head`]);
-      await expect(
-        restorePullRequestComparison(
-          git,
-          { number: 12, headRefOid: 'f'.repeat(40), mergeBase: base },
-          'origin',
-          new GhClient(directory, () => Promise.resolve(JSON.stringify({ ...pullRequest, headRefOid: latest }))),
-        ),
-      ).rejects.toThrow('保存した PR の head を取得できません: git fetch:');
+      const fetch = git.fetch.bind(git);
+      const headFetchErrors: unknown[] = [];
+      vi.spyOn(git, 'fetch').mockImplementation((remote, ref) =>
+        fetch(remote, ref).catch((reason: unknown) => {
+          if (ref === 'f'.repeat(40)) {
+            headFetchErrors.push(reason);
+          }
+          throw reason;
+        }),
+      );
+      const error = await restorePullRequestComparison(
+        git,
+        { number: 12, headRefOid: 'f'.repeat(40), mergeBase: base },
+        'origin',
+        new GhClient(directory, () => Promise.resolve(JSON.stringify({ ...pullRequest, headRefOid: latest }))),
+      ).catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('保存した PR の head を取得できません: git fetch:');
+      expect(headFetchErrors).toHaveLength(1);
+      expect((error as Error).cause).toBe(headFetchErrors[0]);
+      expect(error).toBeInstanceOf(AggregateError);
+      const errors = (error as AggregateError).errors as unknown[];
+      expect(errors).toHaveLength(2);
+      expect((errors[0] as Error).message).toBe(PULL_REQUEST_REVISION_CHANGED);
+      expect(errors[1]).toBe(headFetchErrors[0]);
     });
     it.each(['main:refs/heads/injected', '../main', 'main..bad', 'main.lock', 'main\nnext', '', 'x@{1}'])(
       'base ブランチ名 %j を refspec として使用しない',
@@ -242,10 +259,19 @@ describe('gh', () => {
     );
     it('代替取得も失敗したら OID 拒否と代替取得の理由を両方返す', async () => {
       const { git, pullRequest } = await pullRequestRepository();
-      vi.spyOn(git, 'fetch')
-        .mockRejectedValueOnce(new GitError(['fetch'], 'not our ref', 128))
-        .mockRejectedValueOnce(new Error('branch denied'));
-      await expect(preparePullRequest(git, pullRequest)).rejects.toThrow(/not our ref.*branch denied/s);
+      const fallback = new Error('branch denied');
+      const rejected = new GitError(['fetch'], 'not our ref', 128);
+      vi.spyOn(git, 'fetch').mockRejectedValueOnce(rejected).mockRejectedValueOnce(fallback);
+      const error = await preparePullRequest(git, pullRequest).catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/not our ref.*branch denied/s);
+      expect((error as Error).cause).toBe(fallback);
+      expect(error).toBeInstanceOf(AggregateError);
+      const errors = (error as AggregateError).errors as unknown[];
+      expect(errors).toHaveLength(2);
+      const [first, second] = errors;
+      expect(first).toBe(rejected);
+      expect(second).toBe(fallback);
     });
     it('fetch が成功しても要求したオブジェクトが存在しなければ比較しない', async () => {
       const { git, pullRequest } = await pullRequestRepository();

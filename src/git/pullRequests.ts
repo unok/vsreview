@@ -38,8 +38,11 @@ async function ensurePullRequestObjects(
       try {
         await git.fetch(remote, `refs/heads/${pullRequest.baseRefName}`);
       } catch (fallbackError) {
-        throw new Error(
+        // OID 拒否と代替取得の失敗はどちらも原因なので、errors に両方を残す。cause は直前に捕まえた失敗。
+        throw new AggregateError(
+          [error, fallbackError],
           `${error.message}; ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+          { cause: fallbackError },
         );
       }
     }
@@ -111,12 +114,15 @@ export async function restorePullRequestComparison(
   const remote = await resolvePullRequestRemote(git, source, configured);
   if (!(await git.hasCommit(comparison.headRefOid))) {
     await fetchPullRequestHead(git, { number: comparison.number, headRefOid: comparison.headRefOid }, remote).catch(
-      async () => {
+      async (refError: unknown) => {
         try {
           await git.fetch(remote, comparison.headRefOid);
         } catch (error) {
-          throw new Error(
+          // PR の ref からの取得と OID 直接の取得はどちらも原因なので、errors に両方を残す。cause は直前に捕まえた失敗。
+          throw new AggregateError(
+            [refError, error],
             `保存した PR の head を取得できません: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
           );
         }
       },
