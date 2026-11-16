@@ -3,7 +3,7 @@ import type * as vscode from 'vscode';
 import { window, docs, commands, textDocument, Uri } from './vscodeMock';
 import { runInNewContext } from 'node:vm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { clickCommentInput, createCommentInput } from '../e2e/commentInput';
+import { clickCommentInput, clickCommentSaveButton, createCommentInput } from '../e2e/commentInput';
 import { clickWorkbenchElement } from '../e2e/workbench';
 import { E2E_POLL_MS, E2E_TIMEOUT_MS } from '../e2e/timeouts';
 
@@ -19,6 +19,73 @@ describe('commentInput', () => {
   afterEach(() => {
     vi.mocked(clickWorkbenchElement).mockReset();
     commands.executeCommand.mockReset();
+  });
+  it.each([
+    [0, 'fix', { x: 120, y: 25 }],
+    [1, 'question', { x: 30, y: 25 }],
+  ] as const)(
+    '保存ボタンが %i 個の間は待ち、2 個揃ったら %s のボタンをクリックする',
+    async (count, purpose, expected) => {
+      vi.useFakeTimers();
+      const buttons = [
+        {
+          textContent: '修正依頼として保存',
+          classList: { contains: () => false },
+          getBoundingClientRect: () => ({ x: 100, y: 20, width: 40, height: 10 }),
+        },
+        {
+          textContent: '質問として保存',
+          classList: { contains: () => true },
+          getBoundingClientRect: () => ({ x: 10, y: 20, width: 40, height: 10 }),
+        },
+      ];
+      let visible = buttons.slice(0, count);
+      let coordinates: unknown;
+      vi.mocked(clickWorkbenchElement).mockImplementationOnce(async (expression) => {
+        coordinates = await runInNewContext(expression, {
+          document: {
+            querySelectorAll: () => [
+              {
+                getAttribute: () => uri.toString(),
+                closest: () => ({ querySelectorAll: () => visible }),
+              },
+            ],
+          },
+          Date,
+          setTimeout,
+        });
+      });
+      const pending = clickCommentSaveButton(uri, purpose);
+      await vi.advanceTimersByTimeAsync(E2E_POLL_MS);
+      expect(coordinates).toBeUndefined();
+      visible = buttons;
+      await vi.advanceTimersByTimeAsync(E2E_POLL_MS);
+      await pending;
+      expect(coordinates).toEqual(expected);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+  it('保存ボタンが3個あれば、数とラベルを示して待たずに失敗する', async () => {
+    vi.useFakeTimers();
+    const buttons = ['修正依頼として保存', '質問として保存', '余分なボタン'].map((textContent) => ({ textContent }));
+    vi.mocked(clickWorkbenchElement).mockImplementationOnce(async (expression) => {
+      await runInNewContext(expression, {
+        document: {
+          querySelectorAll: () => [
+            {
+              getAttribute: () => uri.toString(),
+              closest: () => ({ querySelectorAll: () => buttons }),
+            },
+          ],
+        },
+        Date,
+        setTimeout,
+      });
+    });
+    await expect(clickCommentSaveButton(uri, 'question')).rejects.toThrow(
+      '保存ボタンが 3 個あります（期待値: 2 個）: ["修正依頼として保存","質問として保存","余分なボタン"]',
+    );
+    expect(vi.getTimerCount()).toBe(0);
   });
   it('空の旧文書と閉じた文書を選ばず、コマンドの後から届く新規文書を待つ', async () => {
     vi.useFakeTimers();

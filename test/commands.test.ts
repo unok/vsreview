@@ -486,6 +486,7 @@ describe('commands', () => {
       for (const value of [null, {}, 'bad']) {
         await commands.executeCommand('vsreview.copyHash', value);
         await commands.executeCommand('vsreview.addRangeComment', value);
+        await commands.executeCommand('vsreview.addRangeQuestion', value);
         expect(env.clipboard.writeText).toHaveBeenCalledTimes(1);
         expect(state.writes).toEqual([]);
         expect(docs).toEqual([]);
@@ -501,12 +502,18 @@ describe('commands', () => {
         new Range(0, 0, 0, 1) as vscode.Range,
         [],
       );
-      await commands.executeCommand('vsreview.addRangeComment', { thread: outside, text: '保存不可' });
+      for (const [index, command] of ['vsreview.addRangeComment', 'vsreview.addRangeQuestion'].entries()) {
+        await commands.executeCommand(command, { thread: outside, text: '保存不可' });
+        expect(window.showErrorMessage).toHaveBeenCalledTimes(index + 1);
+        expect(window.showErrorMessage).toHaveBeenNthCalledWith(
+          index + 1,
+          'VSReview: この文書にはコメントを追加できません',
+        );
+      }
       expect(comments.all).toEqual([]);
       expect(state.writes).toEqual([]);
-      expect(window.showErrorMessage).toHaveBeenLastCalledWith('VSReview: この文書にはコメントを追加できません');
       await commands.executeCommand('vsreview.addRangeComment', { thread, text: '修正してください' });
-      expect(comments.all[0]?.body).toBe('修正してください');
+      expect(comments.all[0]).toMatchObject({ body: '修正してください', purpose: 'fix' });
       expect(state.writes).toHaveLength(1);
       const saved = comments.all[0]!;
       await commands.executeCommand('vsreview.openComment', saved);
@@ -524,6 +531,20 @@ describe('commands', () => {
       expect(comments.all[0]).toMatchObject({ purpose: 'question', resolved: true });
       await commands.executeCommand('vsreview.deleteComment', { kind: 'comment', comment: saved });
       expect(comments.all).toEqual([]);
+      const questionThread = controller.createCommentThread(uri, new Range(0, 0, 0, 1) as vscode.Range, []);
+      const writesBeforeQuestion = state.writes.length;
+      await commands.executeCommand('vsreview.addRangeQuestion', { thread: questionThread, text: '根拠は何ですか' });
+      expect(comments.all).toHaveLength(1);
+      expect(comments.all[0]).toMatchObject({
+        body: '根拠は何ですか',
+        purpose: 'question',
+        side: 'new',
+        startLine: 1,
+        endLine: 1,
+      });
+      expect(state.writes).toHaveLength(writesBeforeQuestion + 1);
+      expect(disposedThreads.has(questionThread)).toBe(true);
+      await commands.executeCommand('vsreview.deleteComment', comments.all[0]);
       input.mockResolvedValueOnce('clear through command');
       await commands.executeCommand('vsreview.addFileComment', target);
       expect(comments.all.map((comment) => comment.body)).toEqual(['clear through command']);
@@ -1223,6 +1244,32 @@ describe('コメントノードの一括削除コマンド', () => {
     warning.mockResolvedValueOnce('削除');
     await commands.executeCommand('vsreview.clearCommitComments', group);
     expect(api.comments.all.map((c) => c.id)).toEqual(['other-repo', 'pr', 'old-pr', 'other-pr']);
+  });
+
+  it('新規保存は修正依頼を主ボタンの inline@1 に、質問を inline@2 に登録し、パレットには表示しない', async () => {
+    const manifest = JSON.parse(await readFile('package.json', 'utf8')) as {
+      contributes: {
+        commands: { command: string; title: string; icon?: string }[];
+        menus: Record<string, { command: string }[]>;
+      };
+    };
+    const buttons = [
+      { command: 'vsreview.addRangeComment', title: '修正依頼として保存', group: 'inline@1' },
+      { command: 'vsreview.addRangeQuestion', title: '質問として保存', group: 'inline@2' },
+    ];
+    expect(manifest.contributes.menus['comments/commentThread/context']).toEqual(
+      buttons.map(({ command, group }) => ({ command, group, when: 'commentController == vsreview' })),
+    );
+    for (const { command, title } of buttons) {
+      expect(manifest.contributes.commands.find((entry) => entry.command === command)).toEqual({ command, title });
+      expect(manifest.contributes.menus.commandPalette).toContainEqual({ command, when: 'false' });
+      expect(
+        Object.entries(manifest.contributes.menus)
+          .filter(([, entries]) => entries.some((entry) => entry.command === command))
+          .map(([name]) => name)
+          .sort(),
+      ).toEqual(['commandPalette', 'comments/commentThread/context']);
+    }
   });
 
   it('種別切り替えは保存済みスレッドとコメントノードだけに表示する', async () => {

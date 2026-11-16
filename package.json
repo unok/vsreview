@@ -106,7 +106,11 @@
       },
       {
         "command": "vsreview.addRangeComment",
-        "title": "コメントを追加"
+        "title": "修正依頼として保存"
+      },
+      {
+        "command": "vsreview.addRangeQuestion",
+        "title": "質問として保存"
       },
       {
         "command": "vsreview.editComment",
@@ -349,7 +353,12 @@
       "comments/commentThread/context": [
         {
           "command": "vsreview.addRangeComment",
-          "group": "inline",
+          "group": "inline@1",
+          "when": "commentController == vsreview"
+        },
+        {
+          "command": "vsreview.addRangeQuestion",
+          "group": "inline@2",
           "when": "commentController == vsreview"
         }
       ],
@@ -413,6 +422,10 @@
         },
         {
           "command": "vsreview.addRangeComment",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.addRangeQuestion",
           "when": "false"
         },
         {

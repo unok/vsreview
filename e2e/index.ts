@@ -1,7 +1,8 @@
 import { exportMarkdown } from '../src/core/export';
+import { commentPurposeLabel } from '../src/core/presentation';
 import { runGit } from '../src/git/client';
 import { poll, waitForActiveEditor } from './timeouts';
-import { clickCommentInput, createCommentInput } from './commentInput';
+import { clickCommentInput, clickCommentSaveButton, createCommentInput } from './commentInput';
 import { selectQuickPick } from './quickPick';
 import { clickWorkbenchElement, visibleElementExpression } from './workbench';
 import { commitAll } from '../fixtures/gitFixtures.mts';
@@ -274,12 +275,14 @@ export async function run(): Promise<void> {
   // 差分へ移ると入力欄が隠れるため、クリック前にコメントウィジェットを開く。
   await vscode.commands.executeCommand('workbench.action.focusCommentOnCurrentLine');
   await clickCommentInput(draft.uri);
+  // Ctrl+Enter が実行する submitComment で、主ボタンの修正依頼として保存されることを確かめる。
   await vscode.commands.executeCommand('editor.action.submitComment');
   await poll(
     () => Promise.resolve(api.comments.all[0]?.body === body ? true : undefined),
     '新規コメントを保存できませんでした',
   );
   assert.equal(api.commitsTree.getTreeItem(latestMain).description, '1 コメント');
+  assert.equal(api.comments.all[0]?.purpose, 'fix');
   await vscode.commands.executeCommand('vsreview.editComment', api.comments.all[0]);
   const editing = await poll(
     () =>
@@ -479,7 +482,7 @@ export async function run(): Promise<void> {
     () => Promise.resolve(prDraft.getText() === prBody ? true : undefined),
     'PR コメントの本文が入力されませんでした',
   );
-  await vscode.commands.executeCommand('editor.action.submitComment');
+  await clickCommentSaveButton(prDraft.uri, 'question');
   const prComment = await poll(
     () =>
       Promise.resolve(
@@ -488,22 +491,25 @@ export async function run(): Promise<void> {
     'PR コメントを保存できませんでした',
   );
   assert.equal(prComment.pullRequest?.title, 'E2E PR review');
+  assert.equal(prComment.purpose, 'question');
   // コメントスレッドのメニュー登録を含めて確かめるため、実ボタンを押す。
   await vscode.commands.executeCommand('workbench.action.focusCommentOnCurrentLine');
-  await clickWorkbenchElement(
-    visibleElementExpression(
-      `[...document.querySelectorAll('.review-widget')].find(widget =>
-        widget.textContent.includes(${JSON.stringify(prBody)}))?.querySelector('.codicon-arrow-swap')`,
-      '保存済み PR コメントの種別切り替えボタンが表示されませんでした',
-    ),
-  );
-  await poll(
-    () =>
-      Promise.resolve(
-        api.comments.all.find((comment) => comment.id === prComment.id)?.purpose === 'question' ? true : undefined,
+  for (const purpose of ['fix', 'question'] as const) {
+    await clickWorkbenchElement(
+      visibleElementExpression(
+        `[...document.querySelectorAll('.review-widget')].find(widget =>
+          widget.textContent.includes(${JSON.stringify(prBody)}))?.querySelector('.codicon-arrow-swap')`,
+        '保存済み PR コメントの種別切り替えボタンが表示されませんでした',
       ),
-    'PR コメントの種別が質問になりませんでした',
-  );
+    );
+    await poll(
+      () =>
+        Promise.resolve(
+          api.comments.all.find((comment) => comment.id === prComment.id)?.purpose === purpose ? true : undefined,
+        ),
+      `PR コメントの種別が${commentPurposeLabel(purpose)}になりませんでした`,
+    );
+  }
   await writeFile(resultFile, JSON.stringify({ status: 'started', step: 'PR question export' }));
   const questionExport = vscode.commands.executeCommand('vsreview.exportComments');
   await selectQuickPick('エクスポート範囲', '特定の PR');
@@ -586,12 +592,13 @@ export async function run(): Promise<void> {
     () => Promise.resolve(uncommittedDraft.getText() === uncommittedBody ? true : undefined),
     '未ステージのコメントを入力できませんでした',
   );
-  await vscode.commands.executeCommand('editor.action.submitComment');
+  await clickCommentSaveButton(uncommittedDraft.uri, 'fix');
   const uncommittedComment = await poll(
     () => Promise.resolve(api.comments.all.find((comment) => comment.body === uncommittedBody)),
     '未ステージのコメントを保存できませんでした',
   );
   assert.equal(uncommittedComment.uncommitted?.kind, 'unstaged');
+  assert.equal(uncommittedComment.purpose, 'fix');
   assert.equal(uncommittedComment.startLine, 3);
   const tabBeforeEdit = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
   assert.ok(tabBeforeEdit instanceof vscode.TabInputTextDiff);

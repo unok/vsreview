@@ -64,32 +64,38 @@ async function fixture(storage = true) {
   return { target, archives, documents, state, context, access, git };
 }
 describe('revisionArchiveDocuments', () => {
-  it('展開先の定義先文書から行・ファイルコメントを修正依頼として保存する', async () => {
-    const { target, documents, context, access } = await fixture();
-    warning.mockResolvedValue('許可');
-    const { left, right } = await documents.diffUris(target);
-    activateTab(new TabInputTextDiff(left, right));
-    const followed = Uri.file(join(dirname(left.fsPath), 'lib.ts')) as vscode.Uri;
-    const doc = textDocument(followed, await readFile(followed.fsPath, 'utf8'));
-    docs.push(doc);
-    const service = new ReviewComments(context.workspaceState, () => undefined, documents, access, {
-      review: () => undefined,
-    });
-    disposeAfter(service);
-    await service.addRangeComment({
-      thread: controller.createCommentThread(followed, new vscode.Range(0, 0, 0, 5), []),
-      text: '理由は何ですか',
-    });
-    const ref = await documents.assertCommentable(doc);
-    input.mockResolvedValueOnce('ファイルへの質問');
-    await service.addFileComment(ref, doc);
-    expect(
-      service.all.map((comment) => ({ purpose: comment.purpose, side: comment.side, path: comment.path })),
-    ).toEqual([
-      { purpose: 'fix', side: 'old', path: 'lib.ts' },
-      { purpose: 'fix', side: 'file', path: 'lib.ts' },
-    ]);
-  });
+  it.each(['fix', 'question'] as const)(
+    '展開先の行コメントを %s で保存し、ファイルコメントは修正依頼とする',
+    async (purpose) => {
+      const { target, documents, context, access } = await fixture();
+      warning.mockResolvedValue('許可');
+      const { left, right } = await documents.diffUris(target);
+      activateTab(new TabInputTextDiff(left, right));
+      const followed = Uri.file(join(dirname(left.fsPath), 'lib.ts')) as vscode.Uri;
+      const doc = textDocument(followed, await readFile(followed.fsPath, 'utf8'));
+      docs.push(doc);
+      const service = new ReviewComments(context.workspaceState, () => undefined, documents, access, {
+        review: () => undefined,
+      });
+      disposeAfter(service);
+      await service.addRangeComment(
+        {
+          thread: controller.createCommentThread(followed, new vscode.Range(0, 0, 0, 5), []),
+          text: '理由は何ですか',
+        },
+        purpose,
+      );
+      const ref = await documents.assertCommentable(doc);
+      input.mockResolvedValueOnce('ファイルへの質問');
+      await service.addFileComment(ref, doc);
+      expect(
+        service.all.map((comment) => ({ purpose: comment.purpose, side: comment.side, path: comment.path })),
+      ).toEqual([
+        { purpose, side: 'old', path: 'lib.ts' },
+        { purpose: 'fix', side: 'file', path: 'lib.ts' },
+      ]);
+    },
+  );
 
   it('サブパッケージのパターンリンクは復元後もコメント対象にしない', async () => {
     const { target, archives, documents, context, access, git } = await fixture();

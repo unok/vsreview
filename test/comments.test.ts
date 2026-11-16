@@ -40,29 +40,37 @@ import { describe, beforeEach, expect, it, vi } from 'vitest';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { commitAll, gitAsAuthor } from './gitFixtures';
-import { GitClient } from '../src/git/client';
+import { GitClient, runGit } from '../src/git/client';
 import { ReviewDocuments, WORKING_TREE_MISMATCH } from '../src/ui/documents';
 import { shortHash } from '../src/core/presentation';
 import { ReviewComments } from '../src/ui/comments';
 import { revisionUri, RevisionProvider } from '../src/ui/revisions';
-import { serialize, deserialize, type ReviewComment } from '../src/core/model';
+import { serialize, deserialize, type ReviewComment, type CommentPurpose } from '../src/core/model';
 import { createUncommittedChanges } from '../src/git/uncommitted';
 
 // 再登録の有無を使う既存ケースは、モックが持たない VS Code 所有の入力欄の再生成を検出するため。
 // 実際の未保存本文とフォーカスの保持は E2E で検証し、競合ケースは再問い合わせを入口で観測する。
 describe('comments', () => {
-  it('未コミットの左右の範囲とファイルコメントを保存し、編集・解決・削除でも対象を保持する', async () => {
+  it.each([
+    ['staged', 'fix'],
+    ['staged', 'question'],
+    ['unstaged', 'fix'],
+    ['unstaged', 'question'],
+  ] as const)('%s の左右の範囲を %s で保存し、ファイルコメントと対象情報を保持する', async (kind, purpose) => {
     const { directory, git } = await repository();
     await writeFile(join(directory, 'a'), 'one\ntwo\nthree\n');
     await commitAll(directory, 'base');
     await writeFile(join(directory, 'a'), 'ONE\ntwo\nTHREE\n');
+    if (kind === 'staged') {
+      await runGit(directory, ['add', 'a']);
+    }
     const changes = await createUncommittedChanges(git, '2026-11-14T00:00:00Z');
     const target = {
       repo: directory,
-      ...changes.unstaged,
-      file: changes.unstaged.files[0]!,
+      ...changes[kind],
+      file: changes[kind].files[0]!,
       uncommitted: {
-        kind: 'unstaged' as const,
+        kind,
         ...(changes.head ? { head: changes.head } : {}),
         createdAt: changes.createdAt,
       },
@@ -79,10 +87,13 @@ describe('comments', () => {
       const uri = revisionUri(target, side);
       const doc = textDocument(uri, await provider.provideTextDocumentContent(uri));
       docs.push(doc);
-      await service.addRangeComment({
-        thread: controller.createCommentThread(uri, range as vscode.Range, []),
-        text: side,
-      });
+      await service.addRangeComment(
+        {
+          thread: controller.createCommentThread(uri, range as vscode.Range, []),
+          text: side,
+        },
+        purpose,
+      );
     }
     input.mockResolvedValueOnce('file');
     await service.addFileComment(target);
@@ -91,26 +102,31 @@ describe('comments', () => {
       ['old', 1, 2],
       ['file', 0, 0],
     ]);
+    const label = kind === 'staged' ? 'ステージ済み' : '未ステージ';
     for (const c of deserialize(state.value)) {
       expect(c).toMatchObject({
-        purpose: 'fix',
+        purpose: c.side === 'file' ? 'fix' : purpose,
         uncommitted: target.uncommitted,
-        subject: '未コミットの変更（未ステージ）',
+        subject: `未コミットの変更（${label}）`,
         author: '',
         date: changes.createdAt,
       });
     }
     expect(service.all[0]?.excerpt).toContain('THREE');
-    expect(threads.some((t) => t.label?.startsWith('未コミットの変更（未ステージ）'))).toBe(true);
+    expect(threads.some((t) => t.label?.startsWith(`未コミットの変更（${label}）`))).toBe(true);
     const first = service.all[0]!;
     const firstThread = threads.find(
       (thread) => thread.comments[0] && 'id' in thread.comments[0] && thread.comments[0].id === first.id,
     )!;
-    expect(firstThread.label).toBe('未コミットの変更（未ステージ） · new L3-L3 · 修正依頼 · 未解決');
+    expect(firstThread.label).toBe(
+      `未コミットの変更（${label}） · new L3-L3 · ${purpose === 'fix' ? '修正依頼' : '質問'} · 未解決`,
+    );
     await service.save({ id: first.id, body: 'edited' });
     await service.toggle(first);
     await service.togglePurpose(first);
-    expect(firstThread.label).toBe('未コミットの変更（未ステージ） · new L3-L3 · 質問 · 解決済み');
+    expect(firstThread.label).toBe(
+      `未コミットの変更（${label}） · new L3-L3 · ${purpose === 'fix' ? '質問' : '修正依頼'} · 解決済み`,
+    );
     expect(service.all[0]).toMatchObject({ body: 'edited', resolved: true, uncommitted: target.uncommitted });
     await service.delete(first);
     expect(service.all.map((c) => c.side)).toEqual(['old', 'file']);
@@ -162,6 +178,83 @@ describe('comments', () => {
   function reply(doc: vscode.TextDocument, text: string, range = new Range(1, 0, 1, 1)): vscode.CommentReply {
     return { thread: controller.createCommentThread(doc.uri, range as vscode.Range, []), text };
   }
+  it.each([
+    ['既定は質問文でも修正依頼', 'new', new Range(0, 0, 0, 1), '理由は何ですか', undefined, 1, 1],
+    ['明示した修正依頼', 'new', new Range(0, 0, 0, 1), '理由は何ですか', 'fix', 1, 1],
+    ['質問を直接保存', 'new', new Range(0, 0, 0, 1), '理由は何ですか', 'question', 1, 1],
+    ['旧側の複数行', 'old', new Range(1, 0, 2, 1), '削除の理由は？', 'question', 2, 3],
+    ['次行の列0を除く', 'new', new Range(1, 0, 2, 0), '範囲の質問', 'question', 2, 2],
+    ['最終行のゼロ幅選択', 'new', new Range(2, 0, 2, 0), '最後の行の質問', 'question', 3, 3],
+    ['空白と改行を保持', 'new', new Range(0, 0, 0, 1), '  根拠は？\n補足  ', 'question', 1, 1],
+  ] as const)('%s', async (_name, side, range, body, purpose, startLine, endLine) => {
+    state.value = undefined;
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    const doc = await open(side);
+    const inputReply = reply(doc, body, range);
+    await service.addRangeComment(inputReply, purpose);
+    expect(service.all).toHaveLength(1);
+    const expected = {
+      body,
+      purpose: purpose ?? 'fix',
+      side,
+      startLine,
+      endLine,
+      code: doc
+        .getText()
+        .split('\n')
+        .slice(startLine - 1, endLine)
+        .join('\n'),
+      resolved: false,
+    };
+    expect(service.all[0]).toMatchObject(expected);
+    expect(deserialize(state.value)).toEqual(service.all);
+    expect(state.writes).toHaveLength(1);
+    expect(disposedThreads.has(inputReply.thread)).toBe(true);
+    const thread = threads.find((thread) => thread.comments.length)!;
+    expect(thread.canReply).toBe(false);
+    expect(thread.label).toContain(purpose === 'question' ? '質問' : '修正依頼');
+    const restored = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(restored);
+    expect(restored.all).toEqual(service.all);
+    await service.edit(thread);
+    expect(thread.comments[0]?.mode).toBe(CommentMode.Editing);
+    service.cancelEdit(thread);
+    expect(thread.comments[0]?.mode).toBe(CommentMode.Preview);
+    await service.save({ id: service.all[0]!.id, body: '編集後' });
+    expect(service.all[0]).toMatchObject({ ...expected, body: '編集後' });
+  });
+  it.each(['fix', 'question'] as const)('%s は空本文・不正引数を保存しない', async (purpose) => {
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    const doc = await open('new');
+    for (const body of ['', ' \n\t']) {
+      const inputReply = reply(doc, body);
+      await service.addRangeComment(inputReply, purpose);
+      expect(disposedThreads.has(inputReply.thread)).toBe(false);
+    }
+    for (const argument of [
+      undefined,
+      null,
+      {},
+      { thread: {}, text: '本文' },
+      { ...reply(doc, '本文'), text: 1 },
+      { thread: { uri: doc.uri, range: {}, dispose() {} }, text: '本文' },
+    ]) {
+      await service.addRangeComment(argument, purpose);
+    }
+    expect(service.all).toEqual([saved]);
+    expect(state.writes).toEqual([]);
+  });
+  it.each([null, '', 'other', 'FIX', 0, {}])('不正な種別 %j では保存しない', async (purpose) => {
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    const inputReply = reply(await open('new'), '本文');
+    await service.addRangeComment(inputReply, purpose as unknown as CommentPurpose);
+    expect(disposedThreads.has(inputReply.thread)).toBe(false);
+    expect(service.all).toEqual([saved]);
+    expect(state.writes).toEqual([]);
+  });
   it('旧コメントの読み込みだけでは書き込まず、不正な種別は保存せず拒否する', async () => {
     const legacy = Object.fromEntries(Object.entries(saved).filter(([key]) => key !== 'purpose'));
     state.value = { version: 1, comments: [legacy, { ...legacy, id: 'second' }] };
@@ -927,7 +1020,7 @@ describe('comments', () => {
     expect(threads.at(-1)?.comments[0]?.body).toBe(saved.body);
   });
 
-  it('保存データの破損を拒否し、空側や範囲外のコメントは保存しない', async () => {
+  it.each(['fix', 'question'] as const)('保存データの破損を拒否し、空側や範囲外の %s は保存しない', async (purpose) => {
     state.value = { version: 9 };
     expect(() => new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined })).toThrow(
       '保存されたレビューコメントの形式が不正です',
@@ -937,13 +1030,15 @@ describe('comments', () => {
     await service.refresh();
     disposeAfter(service);
     const doc = await open('new');
-    await expect(service.addRangeComment(reply(doc, '範囲外', new Range(99, 0, 99, 1)))).rejects.toThrow(
+    await expect(service.addRangeComment(reply(doc, '範囲外', new Range(99, 0, 99, 1)), purpose)).rejects.toThrow(
       'コメントの範囲がファイルの外です',
     );
     const targetAdded = { ...target, file: { path: 'main.ts', status: 'A' as const } };
     const empty = textDocument(revisionUri(targetAdded, 'old'), '');
     docs.push(empty);
-    await expect(service.addRangeComment(reply(empty, '空側'))).rejects.toThrow('この文書にはコメントを追加できません');
+    await expect(service.addRangeComment(reply(empty, '空側'), purpose)).rejects.toThrow(
+      'この文書にはコメントを追加できません',
+    );
     expect(state.writes).toEqual([]);
   });
   it('全削除は確定したときに全件を保存形式からも除く', async () => {
@@ -1007,7 +1102,7 @@ describe('comments', () => {
     await expect(service.addFileComment(target, doc)).rejects.toThrow(WORKING_TREE_MISMATCH);
     expect(state.writes).toEqual([]);
   });
-  it('patch取得中に対象が変わったら行コメントを保存しない', async () => {
+  it.each(['fix', 'question'] as const)('patch取得中に対象が変わったら %s を保存しない', async (purpose) => {
     await commitAll(target.repo, 'switched', { amend: true });
     const commit = (await new GitClient(target.repo).log(0, 1))[0]!;
     const next = { ...target, commit };
@@ -1028,7 +1123,7 @@ describe('comments', () => {
     const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
     await service.refresh();
     disposeAfter(service);
-    await expect(service.addRangeComment(reply(doc, 'changed'))).rejects.toThrow(
+    await expect(service.addRangeComment(reply(doc, 'changed'), purpose)).rejects.toThrow(
       'レビュー対象が変わりました。差分を開き直してください',
     );
     expect(state.writes).toEqual([]);
@@ -1061,20 +1156,26 @@ describe('comments', () => {
     await service.delete(restored);
     expect(disposedThreads.has(restored)).toBe(true);
   });
-  it('保存失敗では入力スレッドを残し、コメントノードから解決と削除を行う', async () => {
+  it.each(['fix', 'question'] as const)('%s の保存失敗では入力スレッドを残し、再試行できる', async (purpose) => {
     const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
     await service.refresh();
     disposeAfter(service);
     const doc = await open('new');
     const inputReply = reply(doc, 'retry');
     state.fail = true;
-    await expect(service.addRangeComment(inputReply)).rejects.toThrow('disk full');
+    await expect(service.addRangeComment(inputReply, purpose)).rejects.toThrow('disk full');
     expect(disposedThreads.has(inputReply.thread)).toBe(false);
+    expect(service.all).toEqual([saved]);
+    expect(state.writes).toEqual([]);
+    await service.addRangeComment(inputReply, purpose);
+    expect(deserialize(state.value)).toEqual(service.all);
+    expect(service.all[1]).toMatchObject({ body: 'retry', purpose });
+    expect(disposedThreads.has(inputReply.thread)).toBe(true);
     const node = { kind: 'comment', comment: saved };
     await service.toggle(node);
     expect(service.all[0]?.resolved).toBe(true);
     await service.delete(node);
-    expect(service.all).toEqual([]);
+    expect(service.all.map((c) => c.body)).toEqual(['retry']);
   });
   it('コミットだけの共有実ファイルには保存済み比較のスレッドを表示する', async () => {
     saved = { ...saved, side: 'new' };
@@ -1220,7 +1321,11 @@ describe('comments', () => {
     await service.refresh();
     expect(visible()).toEqual([saved.body]);
   });
-  it.each(['file', 'new'] as const)('PR の %s コメントに比較と表示情報を保存する', async (side) => {
+  it.each([
+    ['file', 'fix'],
+    ['new', 'fix'],
+    ['new', 'question'],
+  ] as const)('PR の %s コメントを %s で比較とともに保存する', async (side, purpose) => {
     const comparison = {
       ...pullRequestReview,
       title: 'PR title',
@@ -1240,10 +1345,10 @@ describe('comments', () => {
       const uri = revisionUri(prTarget, 'new');
       const doc = textDocument(uri, await new RevisionProvider(access).provideTextDocumentContent(uri));
       docs.push(doc);
-      await service.addRangeComment(reply(doc, 'saved PR comment'));
+      await service.addRangeComment(reply(doc, 'saved PR comment'), purpose);
     }
     const comment = deserialize(state.value).find((value) => value.body === 'saved PR comment')!;
-    expect(comment.purpose).toBe('fix');
+    expect(comment.purpose).toBe(purpose);
     expect({
       pullRequest: comment.pullRequest,
       subject: comment.subject,
