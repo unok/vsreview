@@ -1,6 +1,27 @@
 import { isRecord } from '../src/core/validation';
-import { pullRequestReview, repository, accessFor, reviewComment } from './fixtures';
-import { window, docs, pick, globalConfiguration, workspaceConfiguration, env } from './vscodeMock';
+import {
+  pullRequestReview,
+  repository,
+  accessFor,
+  reviewComment,
+  MemoryState,
+  reviewDocuments,
+  disposeAfter,
+} from './fixtures';
+import {
+  window,
+  docs,
+  pick,
+  globalConfiguration,
+  workspaceConfiguration,
+  env,
+  controller,
+  Range,
+  textDocument,
+} from './vscodeMock';
+import { ReviewComments } from '../src/ui/comments';
+import { revisionUri, RevisionProvider } from '../src/ui/revisions';
+import type * as vscode from 'vscode';
 import { GitClient, runGit } from '../src/git/client';
 import { exportComments, isExportRequest } from '../src/ui/export';
 import { shortHash } from '../src/core/presentation';
@@ -22,6 +43,46 @@ import { selectComments, type ReviewComment } from '../src/core/model';
 import { targetFromComment } from '../src/core/documents';
 
 describe('export', () => {
+  it.each(['markdown', 'json'] as const)('新規保存した質問を %s に出力し、修正依頼と区別する', async (format) => {
+    const { directory, git } = await repository();
+    await writeFile(join(directory, 'main.ts'), 'const value = 1;\n');
+    await commitAll(directory, 'initial');
+    await writeFile(join(directory, 'main.ts'), 'const value = 2;\n');
+    await commitAll(directory, 'review');
+    const commit = (await git.log(0, 1))[0]!;
+    const target = {
+      repo: directory,
+      commit,
+      parent: await git.parent(commit),
+      file: { path: 'main.ts', status: 'M' as const },
+    };
+    const access = await accessFor(directory);
+    const state = new MemoryState();
+    const comments = new ReviewComments(state, () => {}, reviewDocuments(access), access, { review: () => undefined });
+    disposeAfter(comments);
+    const uri = revisionUri(target, 'new');
+    docs.push(textDocument(uri, await new RevisionProvider(access).provideTextDocumentContent(uri)));
+    for (const purpose of ['fix', 'question'] as const) {
+      await comments.addRangeComment(
+        {
+          thread: controller.createCommentThread(uri, new Range(0, 0, 0, 1) as vscode.Range, []),
+          text: purpose === 'fix' ? '境界値を確認してください' : 'この値の根拠は何ですか',
+        },
+        purpose,
+      );
+    }
+    await exportComments(comments.all, access, { request: { scope: 'all', format, purpose: 'question' } });
+    const output = docs.at(-1)!.getText();
+    expect(output).toContain('この値の根拠は何ですか');
+    expect(output).toContain(DEFAULT_QUESTION_INSTRUCTIONS);
+    expect(output).not.toContain('境界値を確認してください');
+    expect(output).not.toContain(DEFAULT_FIX_COMMIT_INSTRUCTIONS);
+    if (format === 'json') {
+      expect(JSON.parse(output)).toMatchObject({ purpose: 'question', comments: [comments.all[1]] });
+    } else {
+      expect(output).toContain('種別: 質問');
+    }
+  });
   describe.each(['markdown', 'json'] as const)('コメントごとの種別: %s', (format) => {
     const fix = { ...reviewComment, body: '修正本文' };
     const question = { ...fix, id: 'question', purpose: 'question' as const, body: '質問本文' };

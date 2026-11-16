@@ -151,7 +151,8 @@ export function registerReviewCommands(
       selection: new vscode.Range(target.position, target.position),
     });
   });
-  command('addRangeComment', (arg) => comments.addRangeComment(arg));
+  command('addRangeComment', (arg) => comments.addRangeComment(arg, 'fix'));
+  command('addRangeQuestion', (arg) => comments.addRangeComment(arg, 'question'));
   command('editComment', (arg) => comments.edit(arg));
   command('saveComment', (arg) => comments.save(arg));
   command('cancelEdit', (arg) => comments.cancelEdit(arg));

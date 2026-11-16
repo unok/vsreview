@@ -4,7 +4,14 @@ import { PULL_REQUEST_REOPEN } from '../core/pullRequests';
 import type { PullRequestReviews } from './pullRequestReviews';
 import { comparisonKey } from '../core/comparisons';
 import { canonicalCommit, type FileTarget } from '../core/documents';
-import { selectComments, deserialize, serialize, isCommitComment, type ReviewComment } from '../core/model';
+import {
+  selectComments,
+  deserialize,
+  serialize,
+  isCommitComment,
+  type ReviewComment,
+  type CommentPurpose,
+} from '../core/model';
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import { groupBy } from '../core/collections';
@@ -323,7 +330,7 @@ export class ReviewComments implements vscode.Disposable {
       date: pullRequest?.updatedAt ?? commit.date,
     };
   }
-  async addRangeComment(argument: unknown): Promise<void> {
+  async addRangeComment(argument: unknown, purpose: CommentPurpose = 'fix'): Promise<void> {
     if (
       !isRecord(argument) ||
       !isRecord(argument.thread) ||
@@ -353,6 +360,7 @@ export class ReviewComments implements vscode.Disposable {
     }
     const comment: ReviewComment = {
       ...this.base(ref, reply.text),
+      purpose,
       side: ref.side,
       startLine,
       endLine,
