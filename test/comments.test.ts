@@ -45,7 +45,7 @@ import { ReviewDocuments, WORKING_TREE_MISMATCH } from '../src/ui/documents';
 import { shortHash } from '../src/core/presentation';
 import { ReviewComments } from '../src/ui/comments';
 import { revisionUri, RevisionProvider } from '../src/ui/revisions';
-import { serialize, deserialize, type ReviewComment } from '../src/core/model';
+import { serialize, deserialize, type ReviewComment, type CommentPurpose } from '../src/core/model';
 import { createUncommittedChanges } from '../src/git/uncommitted';
 
 // 再登録の有無を使う既存ケースは、モックが持たない VS Code 所有の入力欄の再生成を検出するため。
@@ -243,6 +243,15 @@ describe('comments', () => {
     ]) {
       await service.addRangeComment(argument, purpose);
     }
+    expect(service.all).toEqual([saved]);
+    expect(state.writes).toEqual([]);
+  });
+  it.each([null, '', 'other', 'FIX', 0, {}])('不正な種別 %j では保存しない', async (purpose) => {
+    const service = new ReviewComments(state, vi.fn(), documents, access, { review: () => undefined });
+    disposeAfter(service);
+    const inputReply = reply(await open('new'), '本文');
+    await service.addRangeComment(inputReply, purpose as unknown as CommentPurpose);
+    expect(disposedThreads.has(inputReply.thread)).toBe(false);
     expect(service.all).toEqual([saved]);
     expect(state.writes).toEqual([]);
   });

@@ -9,6 +9,7 @@ import {
   deserialize,
   serialize,
   isCommitComment,
+  isCommentPurpose,
   type ReviewComment,
   type CommentPurpose,
 } from '../core/model';
@@ -331,7 +332,9 @@ export class ReviewComments implements vscode.Disposable {
     };
   }
   async addRangeComment(argument: unknown, purpose: CommentPurpose = 'fix'): Promise<void> {
+    // 拡張 API から型を経ずに呼ばれても、読み込みで拒否される種別を保存しない。
     if (
+      !isCommentPurpose(purpose) ||
       !isRecord(argument) ||
       !isRecord(argument.thread) ||
       typeof argument.text !== 'string' ||
