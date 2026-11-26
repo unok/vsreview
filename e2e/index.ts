@@ -13,6 +13,7 @@ import { basename, dirname, join } from 'node:path';
 import { statusUri } from '../src/ui/decorations';
 import { parseStatusUri } from '../src/core/decorations';
 import type { ReviewApi } from '../src/extension';
+import { checkExplanationFailure, checkExplanations } from './explanations';
 
 async function definition(
   uri: vscode.Uri,
@@ -180,10 +181,10 @@ export async function run(): Promise<void> {
   assert.equal(destination.scheme, 'file');
   assert.equal(destination.fsPath, join(latestMain.repo, 'lib.ts'));
   const historical = commits.find((node) => node.kind === 'commit' && node.commit.subject === 'initial');
-  assert.ok(historical);
+  assert.ok(historical && historical.kind === 'commit');
   const historicalFiles = await api.commitsTree.getChildren(historical);
   const historicalMain = historicalFiles.find((node) => node.kind === 'file' && node.file.path === 'main.ts');
-  assert.ok(historicalMain);
+  assert.ok(historicalMain && historicalMain.kind === 'file');
   await vscode.commands.executeCommand('vsreview.openDiff', historicalMain);
   const historicalDiff = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
   assert.ok(historicalDiff instanceof vscode.TabInputTextDiff);
@@ -526,7 +527,7 @@ export async function run(): Promise<void> {
   assert.ok(!question.includes('fixup'));
   // 拡張のコマンドを使わず別プロセスで amend し、worktree 外の refs の監視を確かめる。
   await commitAll(latestMain.repo, 'amended by agent', { amend: true });
-  await poll(async () => {
+  const amended = await poll(async () => {
     const current = await api.commitsTree.getChildren();
     const head = current[0];
     if (head?.kind !== 'commit' || head.commit.subject !== 'amended by agent') {
@@ -534,7 +535,7 @@ export async function run(): Promise<void> {
     }
     assert.notEqual(head.commit.hash, latestMain.commit.hash);
     assert.ok(!current.some((node) => node.kind === 'commit' && node.commit.hash === latestMain.commit.hash));
-    return true;
+    return head;
   }, 'worktree の外部 amend が自動でコミット一覧に反映されませんでした');
   await writeFile(resultFile, JSON.stringify({ status: 'started', step: 'uncommitted files' }));
   await writeFile(
@@ -635,5 +636,22 @@ export async function run(): Promise<void> {
   await waitForActiveEditor(savedDiff.modified, '保存時点の差分が開きませんでした');
   assert.equal(vscode.window.activeTextEditor?.selection.start.line, 2);
   assert.equal((await vscode.workspace.openTextDocument(savedDiff.modified)).getText(), working);
+  await writeFile(resultFile, JSON.stringify({ status: 'started', step: 'commit explanations' }));
+  const explanationCommit = (await api.commitsTree.getChildren()).find(
+    (node) => node.kind === 'commit' && node.commit.hash === amended.commit.hash,
+  );
+  assert.ok(explanationCommit && explanationCommit.kind === 'commit');
+  const explanationFiles = await api.commitsTree.getChildren(explanationCommit);
+  const explanationMain = explanationFiles.find((node) => node.kind === 'file' && node.file.path === 'main.ts');
+  assert.ok(explanationMain && explanationMain.kind === 'file');
+  const explanationNested = explanationFiles.find(
+    (node) => node.kind === 'file' && node.file.path === 'src/ui/nested.ts',
+  );
+  assert.ok(explanationNested && explanationNested.kind === 'file');
+  await checkExplanations(api, explanationCommit, explanationMain, explanationNested);
+  await writeFile(resultFile, JSON.stringify({ status: 'started', step: 'commit explanation failure' }));
+  // 再生成の確認ダイアログで自動操作が止まるため、失敗の検証は未生成のコミットを使う。
+  // 再生成に失敗しても以前の解説が残ることは test/reviewExplanations.test.ts で確かめる。
+  await checkExplanationFailure(api, historical, historicalMain);
   await writeFile(resultFile, JSON.stringify({ status: 'passed' }));
 }
