@@ -1,3 +1,4 @@
+import childProcess from 'node:child_process';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it, vi, type Mock } from 'vitest';
@@ -6,10 +7,9 @@ import type { CommitTarget } from '../src/core/documents';
 import { ExplanationOutputError, type StoredExplanation } from '../src/core/explanations';
 import { AgentCliError, type runAgent } from '../src/git/agentCli';
 import { ExplanationStore } from '../src/git/explanationStore';
-import { runGit } from '../src/git/client';
+import { GitClient, GitError, runGit } from '../src/git/client';
 import { isBinaryPatch } from '../src/core/diff';
 import type { ExplanationAgent } from '../src/core/explanations';
-import { GitClient } from '../src/git/client';
 import { shortHash } from '../src/core/presentation';
 import {
   NO_CHANGED_FILES,
@@ -17,7 +17,7 @@ import {
   ReviewExplanations,
   explanationTargetLabel,
 } from '../src/ui/explanations';
-import { accessFor, repository, temporaryDirectory } from './fixtures';
+import { accessFor, gitProcesses, repository, temporaryDirectory, workspaceFolder } from './fixtures';
 import { hashId, repositoryId } from '../src/git/repositoryId';
 import { commitAll, gitAsAuthor } from './gitFixtures';
 import { progressCancelled, window } from './vscodeMock';
@@ -122,6 +122,65 @@ describe('ReviewExplanations', () => {
     expect(explanations.failure(target)).toBeUndefined();
   });
 
+  it('Git がテキストの差分を出しても NUL を含むファイルは送らない', async () => {
+    const { directory, git, explanations, target, run, store } = await service();
+    await writeFile(join(directory, '.gitattributes'), 'forced.txt diff\n');
+    await writeFile(join(directory, 'forced.txt'), 'text\0');
+    await commitAll(directory, 'force text diff');
+    const commit = (await git.log(0, 1))[0]!;
+    const comparison = { ...target, commit, parent: target.commit.hash };
+    const files = await git.files(commit);
+    const file = files.find(({ path }) => path === 'forced.txt')!;
+    expect(await git.patch(comparison.parent, commit.hash, file)).toContain('+text\0');
+
+    await explanations.generate(comparison, files);
+    expect(run.mock.calls[0]?.[1]).toContain('ファイル: ".gitattributes"');
+    expect(run.mock.calls[0]?.[1]).not.toContain('ファイル: "forced.txt"');
+    expect((await saved(store, comparison))?.files).toContainEqual({ ...file, skipped: 'binary' });
+  });
+
+  it('パッチの末尾にだけ NUL がある場合も省略理由を保存する', async () => {
+    const { explanations, target, files, run, store } = await service();
+    const file = files.find(({ path }) => path === 'changed.ts')!;
+    vi.spyOn(GitClient.prototype, 'patch').mockResolvedValueOnce('@@ -1 +1 @@\n-old\n+new\0');
+
+    await explanations.generate(target, [file]);
+    expect(run).not.toHaveBeenCalled();
+    expect((await saved(store, target))?.files).toEqual([{ ...file, skipped: 'binary' }]);
+  });
+
+  it('Git の出力上限を超えたファイルだけを省略し、他の解説を保存する', async () => {
+    const { explanations, target, files, run, store } = await service();
+    const execFile = childProcess.execFile;
+    gitProcesses().mockImplementation((command, args, options, callback) => {
+      const limit = args?.includes('diff') && args.some((arg) => arg.endsWith(':changed.ts'));
+      return execFile(command, args, limit ? { ...options, maxBuffer: 1 } : options, callback);
+    });
+
+    await explanations.generate(target, files);
+    expect(run).toHaveBeenCalledOnce();
+    expect(run.mock.calls[0]?.[1]).toContain('ファイル: "gone.ts"');
+    expect(run.mock.calls[0]?.[1]).not.toContain('ファイル: "changed.ts"');
+    expect((await saved(store, target))?.files).toEqual(
+      expect.arrayContaining([
+        { status: 'M', path: 'changed.ts', skipped: 'tooLarge' },
+        expect.objectContaining({ path: 'gone.ts', markdown: expect.any(String) as string }),
+      ]),
+    );
+    expect(explanations.failure(target)).toBeUndefined();
+  });
+
+  it('パッチの取得が出力上限超過以外の Git エラーで失敗したら解説を保存しない', async () => {
+    const { explanations, target, files, run, store } = await service();
+    const error = new GitError(['diff'], 'stdout maxBuffer length exceeded', 128);
+    vi.spyOn(GitClient.prototype, 'patch').mockRejectedValueOnce(error);
+
+    await explanations.generate(target, files);
+    expect(run).not.toHaveBeenCalled();
+    expect(await saved(store, target)).toBeUndefined();
+    expect(explanations.failure(target)).toBe(error.message);
+  });
+
   it('捨てた ID・欠けた ID・不正な解説の件数をステータスに出す', async () => {
     const run = vi.fn<Run>(() =>
       Promise.resolve(
@@ -224,23 +283,30 @@ describe('ReviewExplanations', () => {
   });
 
   it('別の比較の生成は順番に実行する', async () => {
-    const outputs = [deferred<string>(), deferred<string>()];
-    let calls = 0;
-    const run = vi.fn<Run>(() => outputs[calls++]!.promise);
-    const { explanations, target, files } = await service({ run });
-    const other: CommitTarget = { ...target, parent: target.commit.hash };
-    const first = explanations.generate(target, files);
-    const second = explanations.generate(other, files.slice(0, 1));
-    await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
-    // 2 件目が並行して始まらないことを、少し待ってから確かめる。
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(run).toHaveBeenCalledOnce();
-    expect(explanations.isGenerating(other)).toBe(true);
-    outputs[0]!.resolve('{"files":[]}');
-    await first;
-    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
-    outputs[1]!.resolve('{"files":[]}');
-    await second;
+    const started = deferred<string>();
+    const output = deferred<string>();
+    const run = answering().mockImplementationOnce((_agent, prompt) => {
+      started.resolve(prompt);
+      return output.promise;
+    });
+    const { access, explanations, target, files } = await service({ run });
+    const other = await reviewRepository();
+    await access.discover([workspaceFolder(target.repo), workspaceFolder(other.target.repo)]);
+    const order: string[] = [];
+    const execFile = childProcess.execFile;
+    gitProcesses().mockImplementation((command, args, options, callback) => {
+      if (args?.includes(other.target.repo) && !order.includes('2 件目の Git 起動')) {
+        order.push('2 件目の Git 起動');
+      }
+      return execFile(command, args, options, callback);
+    });
+    const first = explanations.generate(target, files).then(() => {
+      order.push('1 件目の生成完了');
+    });
+    const second = explanations.generate(other.target, other.files);
+    output.resolve(await answering()('claude', await started.promise));
+    await Promise.all([first, second]);
+    expect(order).toEqual(['1 件目の生成完了', '2 件目の Git 起動']);
   });
 
   it.each(['キャンセル', 'dispose'] as const)('%s で実行中の生成を中断し、何も保存しない', async (how) => {
@@ -748,9 +814,16 @@ describe('explanationTargetLabel', () => {
 
 describe('isBinaryPatch', () => {
   it.each([
+    ['Binary files a/x and b/x differ\n', true],
+    ['GIT binary patch\r\nliteral 3\r\n', true],
     ['diff --git a/x b/x\nindex 1..2\nBinary files a/x and b/x differ\n', true],
     ['diff --git a/x b/x\nGIT binary patch\nliteral 3\n', true],
+    ['diff --git a/x b/x\r\nBinary files a/x and b/x differ\r\n', true],
     ['diff --git a/x b/x\n@@ -1 +1 @@\n-Binary files a/x and b/x differ\n+Binary files a/y and b/y differ\n', false],
+    ['@@ -1 +1 @@\r\n-a\r\n+b\r\n', false],
+    ['+a\u2028Binary files a/x and b/x differ\n', false],
+    ['+b\u2029GIT binary patch\n', false],
+    ['+c\rBinary files a/x and b/x differ\n', false],
     ['', false],
   ])('%j はバイナリ: %s', (patch, expected) => {
     expect(isBinaryPatch(patch)).toBe(expected);

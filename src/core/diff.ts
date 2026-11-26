@@ -1,7 +1,7 @@
 export const DIFF_CONTEXT_LINES = 3;
-// 差分の本体の行は記号で始まるため、行頭の見出しだけを見て Git がバイナリとして扱ったかを判定する。
+// Git の差分は LF で区切られ、本文の行は記号で始まる。
 export function isBinaryPatch(patch: string): boolean {
-  return /^(?:Binary files |GIT binary patch)/m.test(patch);
+  return /(?:^|\n)(?:Binary files |GIT binary patch)/.test(patch);
 }
 export interface DiffLine {
   text: string;

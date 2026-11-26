@@ -702,6 +702,9 @@ export class GitClient {
 export function runGitText(repo: string, args: readonly string[]): Promise<string> {
   return runGit(repo, args).then((output) => output.toString('utf8'));
 }
+export function isGitOutputLimitError(error: unknown): boolean {
+  return error instanceof GitError && error.exitCode === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+}
 export function isNotRepository(error: unknown): boolean {
   return (
     error instanceof GitError &&

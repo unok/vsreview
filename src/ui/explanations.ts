@@ -16,7 +16,7 @@ import { isBinaryPatch } from '../core/diff';
 import type { ChangedFile } from '../core/gitParsing';
 import { shortHash, uncommittedLabel } from '../core/presentation';
 import { AgentCliError, runAgent } from '../git/agentCli';
-import type { GitClient } from '../git/client';
+import { isGitOutputLimitError, type GitClient } from '../git/client';
 import type { ExplanationRead, ExplanationStore } from '../git/explanationStore';
 import { errorMessage, showError, showInfo, showStatus } from './common';
 import type { ExplanationPermissions } from './explanationPermissions';
@@ -307,8 +307,16 @@ export class ReviewExplanations implements vscode.Disposable {
       return { ...file, skipped: 'submodule' };
     }
     signal.throwIfAborted();
-    const patch = await git.patch(target.parent, target.commit.hash, file);
-    return isBinaryPatch(patch) ? { ...file, skipped: 'binary' } : { ...file, diff: patch };
+    let patch: string;
+    try {
+      patch = await git.patch(target.parent, target.commit.hash, file);
+    } catch (error) {
+      if (isGitOutputLimitError(error)) {
+        return { ...file, skipped: 'tooLarge' };
+      }
+      throw error;
+    }
+    return isBinaryPatch(patch) || patch.includes('\0') ? { ...file, skipped: 'binary' } : { ...file, diff: patch };
   }
   dispose(): void {
     this.disposed = true;
