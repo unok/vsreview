@@ -1,7 +1,12 @@
 import { isUtf8 } from 'node:buffer';
 import { repositoryId } from './repositoryId';
 import { type TreeRecord, parseTreeRecordMetadata, GIT_REGULAR_MODES } from '../core/gitParsing';
-import { isCaseInsensitiveFilesystem, isNormalizationInsensitiveFilesystem, isUnavailablePathError } from './paths';
+import {
+  directory,
+  isCaseInsensitiveFilesystem,
+  isNormalizationInsensitiveFilesystem,
+  isUnavailablePathError,
+} from './paths';
 import { randomUUID } from 'node:crypto';
 import {
   type FileHandle,
@@ -49,12 +54,6 @@ async function exists(path: string): Promise<boolean> {
       return false;
     }
     throw error;
-  }
-}
-async function directory(path: string): Promise<void> {
-  await mkdir(path, { recursive: true });
-  if (!(await lstat(path)).isDirectory()) {
-    throw new Error(`保存先がディレクトリではありません: ${path}`);
   }
 }
 export class RevisionArchiveStore {
