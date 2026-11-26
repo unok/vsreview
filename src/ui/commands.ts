@@ -16,6 +16,7 @@ import { commentContextValue, type CommentNode, type CommitsTree } from './trees
 import { comparisonKey, commitKey, commentGroupKey } from '../core/comparisons';
 import { isReviewComment, isCommentPurpose, selectComments, type ReviewComment } from '../core/model';
 import type { RewrittenComments } from './rewritten';
+import type { ReviewExplanations } from './explanations';
 import { basename } from 'node:path';
 import { registerCommand, showError, showInfo, showStatus } from './common';
 import { isExportRequest, exportComments, copyInstructions } from './export';
@@ -90,6 +91,7 @@ export function registerReviewCommands(
     pullRequestsTree: PullRequestsTree;
     pullRequestCommands: PullRequestCommands;
     rewatch?: () => Promise<void>;
+    explanations?: Pick<ReviewExplanations, 'load'>;
   },
 ): void {
   const { documents, filesTree, diff, comments, commitsTree, rewritten, access } = app;
@@ -99,7 +101,14 @@ export function registerReviewCommands(
   command('openRevisionFile', (arg) => filesTree.open(arg));
   command('showFileTree', () => updateFileView('tree', commitsTree.git?.root));
   command('showFileList', () => updateFileView('list', commitsTree.git?.root));
-  command('refresh', () => updateRepository(app));
+  command('refresh', async () => {
+    await updateRepository(app);
+    // 一時的な失敗の後も、手動の更新で解説の索引と失敗の記録を読み直す。
+    const root = commitsTree.git?.root;
+    if (root) {
+      await app.explanations?.load(root);
+    }
+  });
   command('selectRepository', () => updateRepository(app, { select: true }));
   command('refreshPullRequests', () => app.pullRequestsTree.reload());
   command('openPullRequest', (node) => app.pullRequestCommands.open(node, diff));

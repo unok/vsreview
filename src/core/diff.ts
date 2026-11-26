@@ -1,4 +1,8 @@
 export const DIFF_CONTEXT_LINES = 3;
+// Git の差分は LF で区切られ、本文の行は記号で始まる。
+export function isBinaryPatch(patch: string): boolean {
+  return /(?:^|\n)(?:Binary files |GIT binary patch)/.test(patch);
+}
 export interface DiffLine {
   text: string;
   kind: ' ' | '+' | '-';

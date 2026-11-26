@@ -27,7 +27,7 @@ import {
   type ChangedFile,
   type Commit,
 } from '../core/gitParsing';
-import { DIFF_CONTEXT_LINES, mapLine, type LineMapping } from '../core/diff';
+import { DIFF_CONTEXT_LINES, isBinaryPatch, mapLine, type LineMapping } from '../core/diff';
 
 // 自動更新キューを無期限に止めず、通常のネットワーク待ちには30秒の猶予を与える。
 export const GIT_FETCH_TIMEOUT_MS = 30_000;
@@ -569,6 +569,15 @@ export class GitClient {
       `${GIT_GITLINK_MODE} `,
     );
   }
+  // 変更の前後どちらかがサブモジュールなら true。
+  async isSubmoduleChange(parent: string, commit: string, file: ChangedFile): Promise<boolean> {
+    const old = fileSide(file, 'old');
+    const next = fileSide(file, 'new');
+    return (
+      (!old.empty && (await this.isGitlink(parent, old.path))) ||
+      (!next.empty && (await this.isGitlink(commit, next.path)))
+    );
+  }
   async content(rev: string, path: string): Promise<{ text: string; binary: boolean }> {
     const content = await this.blob(rev, path);
     return { text: decodeText(content), binary: content.includes(0) };
@@ -683,7 +692,7 @@ export class GitClient {
       '--',
       ...new Set([path, workingPath]),
     ]);
-    if (/^(?:Binary files |GIT binary patch)/m.test(patch)) {
+    if (isBinaryPatch(patch)) {
       return { reason: '作業ツリーのファイルがバイナリのため対応行を特定できません' };
     }
     return mapLine(patch, line, workingPath === path ? {} : { renamedTo: workingPath });
@@ -692,6 +701,9 @@ export class GitClient {
 
 export function runGitText(repo: string, args: readonly string[]): Promise<string> {
   return runGit(repo, args).then((output) => output.toString('utf8'));
+}
+export function isGitOutputLimitError(error: unknown): boolean {
+  return error instanceof GitError && error.exitCode === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
 }
 export function isNotRepository(error: unknown): boolean {
   return (

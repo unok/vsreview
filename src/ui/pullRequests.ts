@@ -11,7 +11,7 @@ import { preparePullRequest } from '../git/pullRequests';
 import type { GitClient } from '../git/client';
 import type { CommitTarget } from '../core/documents';
 import { displayedFileTree } from './fileView';
-import { ChangedFileNodes, type ChangedFileNode } from './changedFileNodes';
+import { ChangedFileNodes, type ChangedFileNode, type ExplainedFile } from './changedFileNodes';
 import type { ChangedFiles } from './repositories';
 import { errorMessage, showError } from './common';
 
@@ -33,8 +33,9 @@ export class PullRequestsTree implements vscode.TreeDataProvider<PullRequestNode
     private readonly source: PullRequestSource,
     private readonly reviews: PullRequestReviews,
     comments: () => readonly ReviewComment[],
+    explained?: ExplainedFile,
   ) {
-    this.files = new ChangedFileNodes(comments);
+    this.files = new ChangedFileNodes(comments, explained);
   }
   private readonly files: ChangedFileNodes;
   static register(
@@ -44,9 +45,17 @@ export class PullRequestsTree implements vscode.TreeDataProvider<PullRequestNode
       comments: () => readonly ReviewComment[];
       source: PullRequestSource;
       reviews: PullRequestReviews;
+      explained?: ExplainedFile;
     },
   ): PullRequestsTree {
-    const tree = new PullRequestsTree(selection, changedFiles, options.source, options.reviews, options.comments);
+    const tree = new PullRequestsTree(
+      selection,
+      changedFiles,
+      options.source,
+      options.reviews,
+      options.comments,
+      options.explained,
+    );
     tree.attachedView = vscode.window.createTreeView('vsreview.pullRequests', { treeDataProvider: tree });
     tree.collapse = tree.attachedView.onDidCollapseElement(({ element }) => {
       if (element.kind === 'pullRequest') {

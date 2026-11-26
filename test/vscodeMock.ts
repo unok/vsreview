@@ -96,6 +96,10 @@ export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
 export const CommentMode = { Editing: 0, Preview: 1 };
 export const CommentThreadState = { Unresolved: 0, Resolved: 1 };
 export const TextEditorRevealType = { InCenter: 0 };
+// VS Code の ProgressLocation.Notification と同じ値。
+export const ProgressLocation = { Notification: 15 };
+// 進捗通知の取り消しボタンを押した状態を作る。
+export const progressCancelled = new EventEmitter<void>();
 export class TabInputTextDiff {
   constructor(
     readonly original: VSCode.Uri,
@@ -347,6 +351,25 @@ export const window = {
   showErrorMessage: vi.fn(),
   showInformationMessage: vi.fn(),
   setStatusBarMessage: vi.fn(),
+  withProgress: vi.fn(
+    (
+      _options: VSCode.ProgressOptions,
+      task: (progress: VSCode.Progress<unknown>, token: VSCode.CancellationToken) => Thenable<unknown>,
+    ) => {
+      let cancelled = false;
+      const token = {
+        get isCancellationRequested() {
+          return cancelled;
+        },
+        onCancellationRequested: (listener: () => unknown) =>
+          progressCancelled.event(() => {
+            cancelled = true;
+            listener();
+          }),
+      } as unknown as VSCode.CancellationToken;
+      return task({ report: vi.fn() }, token);
+    },
+  ),
   registerFileDecorationProvider: vi.fn<(provider: VSCode.FileDecorationProvider) => VSCode.Disposable>(() => ({
     dispose() {},
   })),
@@ -424,6 +447,7 @@ export function resetVscode(): void {
   }
   providers.clear();
   handlers.clear();
+  progressCancelled.dispose();
   documentOpened.dispose();
   documentClosed.dispose();
   documentChanged.dispose();

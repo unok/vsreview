@@ -501,6 +501,15 @@ describe('git', () => {
         reason: '作業ツリーのファイルがバイナリのため対応行を特定できません',
       });
     });
+    it('変更行の U+2028 の後ろにバイナリ見出しがあっても作業ツリーの対応行を返す', async () => {
+      const { directory, git } = await repository();
+      const file = join(directory, 'file');
+      await writeFile(file, 'keep\n');
+      await commitAll(directory, 'text');
+      const hash = (await git.head())!;
+      await writeFile(file, 'new\u2028Binary files a/x and b/x differ\nkeep\n');
+      expect(await git.workingLine(hash, 'file', 1)).toEqual({ line: 2 });
+    });
     it('replace refsがあっても元のコミット・本文・差分を読む', async () => {
       await writeFile(join(directory, 'file'), 'original');
       await commitAll(directory, 'original');

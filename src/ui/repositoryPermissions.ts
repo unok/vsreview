@@ -62,6 +62,11 @@ export class RepositoryPermissions<T extends unknown[]> {
       }
     });
   }
+  // 保存済みの回答が拒否かを返す。確認は表示しない。
+  async denied(repo: string, ...args: T): Promise<boolean> {
+    await this.resetting;
+    return this.state.get<unknown>(this.options.key(repo, ...args)) === false;
+  }
   reset(): Promise<void> {
     this.generation++;
     this.pending.clear();

@@ -33,7 +33,7 @@ function isExplanationMarkdown(markdown: string): boolean {
   return markdown.trim() !== '' && utf8Bytes(markdown) <= EXPLANATION_MARKDOWN_MAX_BYTES;
 }
 
-export type ExplanationSource = ChangedFile & ({ diff: string } | { skipped: 'binary' | 'submodule' });
+export type ExplanationSource = ChangedFile & ({ diff: string } | { skipped: 'binary' | 'submodule' | 'tooLarge' });
 export interface ExplanationRequest {
   id: string;
   file: ChangedFile;
