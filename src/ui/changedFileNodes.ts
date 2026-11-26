@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { commentCounts, type ReviewComment } from '../core/model';
 import { comparisonKey } from '../core/comparisons';
 import type { FileTarget, CommitTarget } from '../core/documents';
+export const EXPLAINED_LABEL = '解説あり';
+export type ExplainedFile = (target: CommitTarget, path: string) => boolean;
 import { flattenFileTree, type FileTreeNode } from '../core/fileTree';
 import { commentCountLabel } from '../core/presentation';
 import { statusLabel, folderStatus } from '../core/decorations';
@@ -12,7 +14,10 @@ export type ChangedFileNode =
 export class ChangedFileNodes {
   private countedComments: readonly ReviewComment[] | undefined;
   private commentCounts = new Map<string, Map<string, number>>();
-  constructor(private readonly comments: () => readonly ReviewComment[]) {}
+  constructor(
+    private readonly comments: () => readonly ReviewComment[],
+    private readonly explained: ExplainedFile = () => false,
+  ) {}
   private counts(): Map<string, Map<string, number>> {
     // ReviewComments は保存時に配列を置き換えるため、参照が変わるまで件数を再利用できる。
     const comments = this.comments();
@@ -53,6 +58,7 @@ export class ChangedFileNodes {
     item.description = [
       node.file.oldPath,
       commentCountLabel(this.counts().get(comparisonKey(node))?.get(node.file.path) ?? 0),
+      this.explained(node, node.file.path) ? EXPLAINED_LABEL : undefined,
     ]
       .filter(Boolean)
       .join(' · ');

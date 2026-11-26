@@ -23,6 +23,12 @@ import { registerReviewCommands, updateRepository } from './ui/commands';
 import { registerNavigation } from './ui/navigation';
 import { AutoRefresh } from './ui/autoRefresh';
 import { showError } from './ui/common';
+import { ExplanationStore } from './git/explanationStore';
+import { captureUncommittedChanges } from './git/uncommitted';
+import type { CommitTarget } from './core/documents';
+import { ExplanationPermissions } from './ui/explanationPermissions';
+import { ReviewExplanations } from './ui/explanations';
+import { ExplanationCommands, registerExplanationCommands } from './ui/explanationCommands';
 export interface ReviewApi {
   commentsTree: CommentsTree;
   commitsTree: CommitsTree;
@@ -65,11 +71,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
     showError(error);
     return;
   }
-  const commitsTree = new CommitsTree(() => comments.all, access, changedFiles);
+  const explanationPermissions = new ExplanationPermissions(context.workspaceState);
+  const explanations = new ReviewExplanations({
+    access,
+    // 保存領域がない場合はメモリだけで持つ。
+    store: new ExplanationStore(context.storageUri?.scheme === 'file' ? context.storageUri.fsPath : undefined),
+    permissions: explanationPermissions,
+  });
+  const explained = (target: CommitTarget, path: string): boolean => explanations.explained(target, path);
+  const commitsTree = new CommitsTree(() => comments.all, access, changedFiles, captureUncommittedChanges, explained);
   const pullRequestsTree = PullRequestsTree.register(commitsTree, changedFiles, {
     comments: () => comments.all,
     reviews: pullRequestReviews,
     source,
+    explained,
   });
   const rewritten = new RewrittenComments(() => rewrittenTargets(comments.all, documents), access, pullRequestReviews);
   const commentsTree = new CommentsTree(() => comments.all, rewritten);
@@ -88,6 +103,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
     rewritten,
     access,
     rewatch: () => autoRefresh.rewatch({ refresh: false }),
+    explanations,
   };
   const statusDecorations = new StatusDecorationProvider();
   context.subscriptions.push(
@@ -103,6 +119,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
       void rewritten.refresh().catch(showError);
     }),
     filesTree,
+    explanations,
+    // 解説の生成・保存・読み込みで「解説あり」の表示を更新する。
+    explanations.onDidChange(() => {
+      commitsTree.rerender();
+      pullRequestsTree.rerender();
+    }),
+    // 起動時の最初の選択もリポジトリの変更として届く。
+    commitsTree.onDidChangeRepository(() => {
+      const root = commitsTree.git?.root;
+      if (root) {
+        void explanations.load(root).catch(showError);
+      }
+    }),
     commitsTree.onDidChangeHistory(() => {
       void filesTree.synchronize({ refresh: true }).catch(showError);
     }),
@@ -173,6 +202,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
   );
   registerNavigation(context, documents, access);
   registerReviewCommands(context, app);
+  registerExplanationCommands(
+    context,
+    new ExplanationCommands({ access, changedFiles, commitsTree, pullRequestsTree, explanations }),
+    explanationPermissions,
+  );
   void updateRepository(app, { select: true, discover: false }).then(synchronizeEditors).catch(showError);
   void synchronizeEditors();
   return {

@@ -10,13 +10,14 @@ import {
   type ExplanationAgent,
   type ExplanationSource,
   type ParsedExplanation,
+  type StoredExplanationFile,
 } from '../core/explanations';
 import { isBinaryPatch } from '../core/diff';
 import type { ChangedFile } from '../core/gitParsing';
 import { shortHash, uncommittedLabel } from '../core/presentation';
 import { AgentCliError, runAgent } from '../git/agentCli';
 import type { GitClient } from '../git/client';
-import type { ExplanationStore } from '../git/explanationStore';
+import type { ExplanationRead, ExplanationStore } from '../git/explanationStore';
 import { errorMessage, showError, showInfo, showStatus } from './common';
 import type { ExplanationPermissions } from './explanationPermissions';
 import { explanationAgentSetting } from './explanationSettings';
@@ -28,10 +29,20 @@ export const RESET_EXPLANATION_PERMISSIONS_TITLE = 'VSReview: 解説のための
 
 export interface ReviewExplanationsDependencies {
   access: Pick<RepositoryAccess, 'client'>;
-  store: Pick<ExplanationStore, 'load' | 'write'>;
+  store: Pick<ExplanationStore, 'has' | 'load' | 'read' | 'write'>;
   permissions: Pick<ExplanationPermissions, 'allowed' | 'denied'>;
   run?: typeof runAgent;
   agent?: () => ExplanationAgent;
+}
+
+// 比較の保存済みの解説の読み込み状態。failed は読み込み自体が失敗した場合（権限など）。
+export type ExplanationRecordState = ExplanationRead | { kind: 'loading' } | { kind: 'failed'; message: string };
+export interface ExplanationQuery {
+  record: ExplanationRecordState;
+  // record が found のとき、そのパスの解説または解説なしの理由。記録にないパスでは undefined。
+  file?: StoredExplanationFile;
+  generating: boolean;
+  failure?: string;
 }
 
 export function explanationTargetLabel(target: CommitTarget): string {
@@ -59,8 +70,13 @@ export class ReviewExplanations implements vscode.Disposable {
   private readonly queue = new SerialQueue();
   private readonly pending = new PromiseCache<void>();
   private readonly generatingKeys = new Set<string>();
-  private readonly failures = new Map<string, string>();
+  // リポジトリごとの比較の最後の失敗。load で破棄する。
+  private readonly failures = new Map<string, Map<string, string>>();
+  // リポジトリごとの索引の読み込み。進行中・完了済みの読み込みを共有する。
+  private readonly loads = new Map<string, Promise<void>>();
   private readonly controllers = new Set<AbortController>();
+  // ツリーとビューが同期的に引けるよう、読み込んだ比較の記録をリポジトリごとに持つ。
+  private readonly records = new Map<string, Map<string, ExplanationRecordState>>();
   private disposed = false;
   private readonly run: typeof runAgent;
   private readonly agent: () => ExplanationAgent;
@@ -68,16 +84,92 @@ export class ReviewExplanations implements vscode.Disposable {
     this.run = dependencies.run ?? runAgent;
     this.agent = dependencies.agent ?? explanationAgentSetting;
   }
+  // 比較に保存済みの解説があるかを返す。load の前は false。
+  has(target: CommitTarget): boolean {
+    return this.dependencies.store.has(target.repo, comparisonKey(target));
+  }
   isGenerating(target: CommitTarget): boolean {
     return this.generatingKeys.has(comparisonKey(target));
   }
   failure(target: CommitTarget): string | undefined {
-    return this.failures.get(comparisonKey(target));
+    return this.failures.get(target.repo)?.get(comparisonKey(target));
   }
-  async load(repo: string): Promise<void> {
-    await this.dependencies.store.load(repo);
+  // 索引を読み直し、読み込み済みの記録と失敗の記録を破棄する。
+  load(repo: string): Promise<void> {
+    const loading = (async () => {
+      await this.dependencies.store.load(repo);
+      this.records.delete(repo);
+      this.failures.delete(repo);
+      if (!this.disposed) {
+        this.changed.fire();
+      }
+    })();
+    this.loads.set(repo, loading);
+    // 失敗した読み込みは共有せず、次の呼び出しで読み直す。
+    loading.catch(() => {
+      if (this.loads.get(repo) === loading) {
+        this.loads.delete(repo);
+      }
+    });
+    return loading;
+  }
+  // 索引の読み込みが終わるのを待つ。未読み込みなら読み込み、進行中なら共有する。
+  ensureLoaded(repo: string): Promise<void> {
+    return this.loads.get(repo) ?? this.load(repo);
+  }
+  // 比較とパスの解説・生成中・最後の失敗を返す。未読み込みなら読み込みを始め、終わったら変更を通知する。
+  explanation(target: CommitTarget, path: string): ExplanationQuery {
+    const key = comparisonKey(target);
+    const record = this.record(target.repo, key);
+    const file = record.kind === 'found' ? record.explanation.files.find((entry) => entry.path === path) : undefined;
+    const failure = this.failures.get(target.repo)?.get(key);
+    return {
+      record,
+      ...(file ? { file } : {}),
+      generating: this.generatingKeys.has(key),
+      ...(failure === undefined ? {} : { failure }),
+    };
+  }
+  // ツリー用。解説（markdown）があるファイルだけ true。解説なしの理由だけのファイルは false。
+  explained(target: CommitTarget, path: string): boolean {
+    const { file } = this.explanation(target, path);
+    return file !== undefined && 'markdown' in file;
+  }
+  private record(repo: string, key: string): ExplanationRecordState {
+    const records = this.records.get(repo) ?? new Map<string, ExplanationRecordState>();
+    this.records.set(repo, records);
+    const cached = records.get(key);
+    if (cached) {
+      return cached;
+    }
+    // 保存のない比較は読みに行かない。
+    if (!this.dependencies.store.has(repo, key)) {
+      return { kind: 'none' };
+    }
+    const loading = { kind: 'loading' } as const;
+    records.set(key, loading);
+    void this.dependencies.store.read(repo, key).then(
+      (read) => this.settle(repo, key, loading, read),
+      (error: unknown) => {
+        // 失敗は一度だけ通知し、次の load・生成まで読み直さない。無効になった読み込みの失敗は通知しない。
+        if (this.settle(repo, key, loading, { kind: 'failed', message: errorMessage(error) })) {
+          showError(error);
+        }
+      },
+    );
+    return loading;
+  }
+  private settle(repo: string, key: string, loading: ExplanationRecordState, state: ExplanationRecordState): boolean {
+    const records = this.records.get(repo);
+    // 読み込み中に load・生成で記録が入れ替わっていれば、古い結果を入れない。
+    if (this.disposed || records?.get(key) !== loading) {
+      return false;
+    }
+    records.set(key, state);
     this.changed.fire();
+    return true;
   }
+  // 比較のオブジェクト（PR の head・merge-base、未コミットのスナップショット）は呼び出し側で取得済みとする。
   // 同じ比較の生成中に呼ばれたら、その生成の完了を待つ。再生成は成功したときだけ既存の解説を置き換える。
   generate(target: CommitTarget, files: readonly ChangedFile[]): Promise<void> {
     const key = comparisonKey(target);
@@ -144,7 +236,7 @@ export class ReviewExplanations implements vscode.Disposable {
           }
         },
       );
-      this.failures.delete(key);
+      this.failures.get(target.repo)?.delete(key);
     } catch (error) {
       if (controller.signal.aborted || (error instanceof AgentCliError && error.failure === 'aborted')) {
         if (!this.disposed) {
@@ -152,7 +244,9 @@ export class ReviewExplanations implements vscode.Disposable {
         }
         return;
       }
-      this.failures.set(key, errorMessage(error));
+      const failures = this.failures.get(target.repo) ?? new Map<string, string>();
+      failures.set(key, errorMessage(error));
+      this.failures.set(target.repo, failures);
       showError(error);
     } finally {
       this.controllers.delete(controller);
@@ -198,6 +292,8 @@ export class ReviewExplanations implements vscode.Disposable {
       target.repo,
       explanationRecord(plan, parsed, { comparison: key, agent, generatedAt: new Date().toISOString() }),
     );
+    // 件数の上限で消えた比較もあるので、そのリポジトリの記録を読み直す。
+    this.records.delete(target.repo);
     showStatus(counts ? `解説を保存しました（${counts}）` : '解説を保存しました');
   }
   private async source(

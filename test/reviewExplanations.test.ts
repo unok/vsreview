@@ -17,7 +17,8 @@ import {
   ReviewExplanations,
   explanationTargetLabel,
 } from '../src/ui/explanations';
-import { accessFor, repository } from './fixtures';
+import { accessFor, repository, temporaryDirectory } from './fixtures';
+import { hashId, repositoryId } from '../src/git/repositoryId';
 import { commitAll, gitAsAuthor } from './gitFixtures';
 import { progressCancelled, window } from './vscodeMock';
 
@@ -502,6 +503,214 @@ describe('ReviewExplanations', () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it('保存のない比較は読みに行かず none を返す', async () => {
+    const { explanations, target, store } = await service();
+    const read = vi.spyOn(store, 'read');
+    expect(explanations.explanation(target, 'changed.ts')).toEqual({ record: { kind: 'none' }, generating: false });
+    expect(explanations.explained(target, 'changed.ts')).toBe(false);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('生成後は記録を読み込んで通知し、解説のあるファイルだけを解説ありとする', async () => {
+    const { explanations, target, files, store } = await service();
+    await explanations.generate(target, files);
+    const read = vi.spyOn(store, 'read');
+    const changed = vi.fn();
+    explanations.onDidChange(changed);
+    expect(explanations.explanation(target, 'changed.ts').record).toEqual({ kind: 'loading' });
+    expect(explanations.explained(target, 'changed.ts')).toBe(false);
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    expect(explanations.explanation(target, 'changed.ts')).toMatchObject({
+      record: { kind: 'found' },
+      file: { path: 'changed.ts', markdown: expect.any(String) as string },
+      generating: false,
+    });
+    expect(explanations.explained(target, 'changed.ts')).toBe(true);
+    expect(explanations.explanation(target, 'assets/image.bin').file).toEqual({
+      status: 'A',
+      path: 'assets/image.bin',
+      skipped: 'binary',
+    });
+    expect(explanations.explained(target, 'assets/image.bin')).toBe(false);
+    expect(explanations.explanation(target, 'absent.ts').file).toBeUndefined();
+    expect(explanations.explained(target, 'absent.ts')).toBe(false);
+    // 同じ比較は読み直さない。
+    expect(read).toHaveBeenCalledOnce();
+    // スナップショットや親が違う比較には付けない。
+    expect(
+      explanations.explained({ ...target, commit: { ...target.commit, hash: 'c'.repeat(40) } }, 'changed.ts'),
+    ).toBe(false);
+  });
+
+  it('再生成で保存し直したら、読み込み済みの記録を読み直す', async () => {
+    const run = answering(() => '古い解説');
+    const { explanations, target, files } = await service({ run });
+    await explanations.generate(target, files);
+    explanations.explanation(target, 'changed.ts');
+    await vi.waitFor(() =>
+      expect(explanations.explanation(target, 'changed.ts').file).toMatchObject({ markdown: '古い解説' }),
+    );
+    run.mockImplementation(answering(() => '新しい解説'));
+    await explanations.generate(target, files);
+    explanations.explanation(target, 'changed.ts');
+    await vi.waitFor(() =>
+      expect(explanations.explanation(target, 'changed.ts').file).toMatchObject({ markdown: '新しい解説' }),
+    );
+  });
+
+  it('生成中と最後の失敗も問い合わせに含める', async () => {
+    const output = deferred<string>();
+    const run = vi.fn<Run>(() => output.promise);
+    const { explanations, target, files } = await service({ run });
+    const pending = explanations.generate(target, files);
+    expect(explanations.explanation(target, 'changed.ts').generating).toBe(true);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+    output.reject(new AgentCliError('exit', 'claude が終了コード 1 で失敗しました'));
+    await pending;
+    expect(explanations.explanation(target, 'changed.ts')).toEqual({
+      record: { kind: 'none' },
+      generating: false,
+      failure: 'claude が終了コード 1 で失敗しました',
+    });
+  });
+
+  it('読み込めない保存ファイルは unreadable として返す', async () => {
+    const fixture = await reviewRepository();
+    const storage = await temporaryDirectory();
+    const store = new ExplanationStore(storage);
+    const explanations = new ReviewExplanations({
+      access: fixture.access,
+      store,
+      permissions: { allowed: () => Promise.resolve(true), denied: () => Promise.resolve(false) },
+      run: answering(),
+    });
+    await explanations.generate(fixture.target, fixture.files);
+    await writeFile(
+      join(storage, 'explanations', repositoryId(fixture.target.repo), `${hashId(comparisonKey(fixture.target))}.json`),
+      '{',
+    );
+    explanations.explanation(fixture.target, 'changed.ts');
+    await vi.waitFor(() =>
+      expect(explanations.explanation(fixture.target, 'changed.ts').record).toEqual({ kind: 'unreadable' }),
+    );
+    expect(explanations.explained(fixture.target, 'changed.ts')).toBe(false);
+  });
+
+  it('読み込みの失敗は一度だけ通知し、load まで読み直さない', async () => {
+    const { explanations, target, files, store } = await service();
+    await explanations.generate(target, files);
+    const read = vi.spyOn(store, 'read').mockRejectedValue(new Error('読み込めません'));
+    explanations.explanation(target, 'changed.ts');
+    await vi.waitFor(() =>
+      expect(explanations.explanation(target, 'changed.ts').record).toEqual({
+        kind: 'failed',
+        message: '読み込めません',
+      }),
+    );
+    explanations.explanation(target, 'changed.ts');
+    expect(read).toHaveBeenCalledOnce();
+    expect(window.showErrorMessage).toHaveBeenCalledExactlyOnceWith('VSReview: 読み込めません');
+    read.mockRestore();
+    await explanations.load(target.repo);
+    explanations.explanation(target, 'changed.ts');
+    await vi.waitFor(() => expect(explanations.explained(target, 'changed.ts')).toBe(true));
+  });
+
+  it('ensureLoaded は索引の読み込みを共有し、失敗したら次の呼び出しで読み直す', async () => {
+    const { explanations, store, target } = await service();
+    const loading = deferred<void>();
+    const load = vi.spyOn(store, 'load').mockReturnValueOnce(loading.promise);
+    const first = explanations.ensureLoaded(target.repo);
+    const second = explanations.ensureLoaded(target.repo);
+    loading.resolve();
+    await Promise.all([first, second]);
+    await explanations.ensureLoaded(target.repo);
+    expect(load).toHaveBeenCalledOnce();
+    const other = '/other';
+    load.mockRejectedValueOnce(new Error('索引を読めません'));
+    await expect(explanations.ensureLoaded(other)).rejects.toThrow('索引を読めません');
+    await explanations.ensureLoaded(other);
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('load は他のリポジトリの失敗と読み込み済みの記録を消さない', async () => {
+    const { explanations, target, files, store } = await service();
+    const other: CommitTarget = { ...target, repo: '/other' };
+    // 他のリポジトリの記録と失敗を作る。
+    await store.write(other.repo, {
+      version: 1,
+      comparison: comparisonKey(other),
+      agent: 'claude',
+      generatedAt: '2026-11-26T00:00:00.000Z',
+      promptVersion: 1,
+      files: [{ status: 'M', path: 'changed.ts', markdown: '# 解説' }],
+    });
+    explanations.explanation(other, 'changed.ts');
+    await vi.waitFor(() => expect(explanations.explained(other, 'changed.ts')).toBe(true));
+    await explanations.generate(other, files);
+    expect(explanations.failure(other)).toBeDefined();
+    const read = vi.spyOn(store, 'read');
+    await explanations.load(target.repo);
+    expect(explanations.failure(other)).toBeDefined();
+    expect(explanations.explanation(other, 'changed.ts').record).toMatchObject({ kind: 'found' });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('load は失敗の記録も破棄する', async () => {
+    const run = vi.fn<Run>(() => Promise.reject(new AgentCliError('exit', 'claude が終了コード 1 で失敗しました')));
+    const { explanations, target, files } = await service({ run });
+    await explanations.generate(target, files);
+    expect(explanations.failure(target)).toBe('claude が終了コード 1 で失敗しました');
+    await explanations.load(target.repo);
+    expect(explanations.failure(target)).toBeUndefined();
+    expect(explanations.explanation(target, 'changed.ts').failure).toBeUndefined();
+  });
+
+  it('記録の読み込み中に load したら、無効になった読み込みの失敗を通知しない', async () => {
+    const { explanations, target, files, store } = await service();
+    await explanations.generate(target, files);
+    const reading = deferred<Awaited<ReturnType<typeof store.read>>>();
+    vi.spyOn(store, 'read').mockReturnValueOnce(reading.promise);
+    expect(explanations.explanation(target, 'changed.ts').record).toEqual({ kind: 'loading' });
+    await explanations.load(target.repo);
+    reading.reject(new Error('stale read failed'));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(window.showErrorMessage).not.toHaveBeenCalled();
+  });
+  it.each(['load', 'dispose'] as const)('記録の読み込み中に %s したら、古い結果を入れず通知しない', async (how) => {
+    const { explanations, target, files, store } = await service();
+    await explanations.generate(target, files);
+    const reading = deferred<Awaited<ReturnType<typeof store.read>>>();
+    const read = vi.spyOn(store, 'read').mockReturnValueOnce(reading.promise);
+    expect(explanations.explanation(target, 'changed.ts').record).toEqual({ kind: 'loading' });
+    const changed = vi.fn();
+    if (how === 'load') {
+      await explanations.load(target.repo);
+    } else {
+      explanations.dispose();
+    }
+    explanations.onDidChange(changed);
+    reading.resolve({ kind: 'unreadable' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(changed).not.toHaveBeenCalled();
+    if (how === 'load') {
+      // 古い結果ではなく、読み直した記録を返す。
+      read.mockRestore();
+      explanations.explanation(target, 'changed.ts');
+      await vi.waitFor(() => expect(explanations.explained(target, 'changed.ts')).toBe(true));
+    } else {
+      expect(explanations.explanation(target, 'changed.ts').record).toEqual({ kind: 'loading' });
+    }
+  });
+
+  it('has は保存済みの解説がある比較だけ true を返す', async () => {
+    const { explanations, target, files } = await service();
+    expect(explanations.has(target)).toBe(false);
+    await explanations.generate(target, files);
+    expect(explanations.has(target)).toBe(true);
+    expect(explanations.has({ ...target, parent: target.commit.hash })).toBe(false);
   });
 
   it('load は保存済みの比較を読み込み、変更を通知する', async () => {

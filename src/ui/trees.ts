@@ -1,4 +1,4 @@
-import { ChangedFileNodes, type ChangedFileNode } from './changedFileNodes';
+import { ChangedFileNodes, type ChangedFileNode, type ExplainedFile } from './changedFileNodes';
 import { showRepositoryError, ChangedFiles, type RepositoryAccess } from './repositories';
 import type { ReviewComment } from '../core/model';
 import { commitKey, commentGroupKey } from '../core/comparisons';
@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import { basename } from 'node:path';
 import { displayedFileTree } from './fileView';
 import type { GitClient } from '../git/client';
-import type { Commit } from '../core/gitParsing';
+import type { ChangedFile, Commit } from '../core/gitParsing';
 import { groupBy } from '../core/collections';
 import {
   replaceDisplayControls,
@@ -21,8 +21,8 @@ import {
   commentExcerpt,
 } from '../core/presentation';
 import type { RewrittenComments } from './rewritten';
-import type { UncommittedChanges, UncommittedChange, UncommittedSnapshot } from '../core/uncommitted';
-import { canonicalCommit, type FileTarget } from '../core/documents';
+import type { UncommittedChanges, UncommittedChange, UncommittedKind, UncommittedSnapshot } from '../core/uncommitted';
+import { canonicalCommit, type CommitTarget, type FileTarget } from '../core/documents';
 import { captureUncommittedChanges, type CaptureUncommitted } from '../git/uncommitted';
 import { UNCOMMITTED_LABEL, UNCOMMITTED_KIND_LABELS, uncommittedLabel } from '../core/presentation';
 import { showError, showStatus } from './common';
@@ -59,8 +59,9 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
     private readonly access: RepositoryAccess,
     private readonly changedFiles: ChangedFiles,
     private readonly captureUncommitted: CaptureUncommitted = captureUncommittedChanges,
+    explained?: ExplainedFile,
   ) {
-    this.files = new ChangedFileNodes(comments);
+    this.files = new ChangedFileNodes(comments, explained);
   }
   private readonly files: ChangedFileNodes;
 
@@ -143,22 +144,20 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
       }
     }
   }
-  async refreshUncommitted(target: FileTarget): Promise<FileTarget | undefined> {
-    if (!target.uncommitted) {
-      return target;
-    }
+  // 未コミットの変更を取り直し、選択中のリポジトリならツリーにも反映する。取得の失敗は通知して undefined を返す。
+  private async recapture(repo: string): Promise<UncommittedChanges | undefined> {
     const generation = this.refreshGeneration;
     const captureSequence = ++this.captureSequence;
     let changes: UncommittedChanges;
     try {
-      changes = await this.captureUncommitted(this.access.client(target.repo));
+      changes = await this.captureUncommitted(this.access.client(repo));
     } catch (error) {
       showError(error);
       return undefined;
     }
     if (
-      target.repo === this.selected?.root &&
-      target.repo === this.git?.root &&
+      repo === this.selected?.root &&
+      repo === this.git?.root &&
       generation === this.refreshGeneration &&
       captureSequence > this.appliedCaptureSequence
     ) {
@@ -166,20 +165,35 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
       this.appliedCaptureSequence = captureSequence;
       this.rerender();
     }
+    return changes;
+  }
+  // 区分の比較を取り直す。変更がなくなっていれば files は空になる。
+  async uncommittedChange(
+    repo: string,
+    kind: UncommittedKind,
+  ): Promise<{ target: CommitTarget; files: ChangedFile[] } | undefined> {
+    const changes = await this.recapture(repo);
+    if (!changes) {
+      return undefined;
+    }
+    const change = changes[kind];
+    return { target: uncommittedTarget(repo, change, this.snapshot(changes, change)), files: change.files };
+  }
+  async refreshUncommitted(target: FileTarget): Promise<FileTarget | undefined> {
+    if (!target.uncommitted) {
+      return target;
+    }
+    const changes = await this.recapture(target.repo);
+    if (!changes) {
+      return undefined;
+    }
     const change = changes[target.uncommitted.kind];
     const file = change.files.find((file) => file.path === target.file.path);
     if (!file) {
       showStatus('選択したファイルには未コミットの変更がなくなりました');
       return undefined;
     }
-    const uncommitted = this.snapshot(changes, change);
-    return {
-      repo: target.repo,
-      commit: canonicalCommit(change.commit, change.parent, undefined, uncommitted),
-      parent: change.parent,
-      file,
-      uncommitted,
-    };
+    return { ...uncommittedTarget(target.repo, change, this.snapshot(changes, change)), file };
   }
   private snapshot(changes: UncommittedChanges, change: UncommittedChange): UncommittedSnapshot {
     return {
@@ -268,12 +282,10 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
       if (node.repo !== this.git?.root || this.uncommitted?.[node.change.kind] !== node.change) {
         return [];
       }
-      return this.files.fileNodes(displayedFileTree(node.change.files, node.repo), {
-        repo: node.repo,
-        parent: node.change.parent,
-        uncommitted: node.uncommitted,
-        commit: canonicalCommit(node.change.commit, node.change.parent, undefined, node.uncommitted),
-      });
+      return this.files.fileNodes(
+        displayedFileTree(node.change.files, node.repo),
+        uncommittedTarget(node.repo, node.change, node.uncommitted),
+      );
     }
     if (
       (node.kind !== 'commit' && node.kind !== 'folder') ||
@@ -302,6 +314,15 @@ export class CommitsTree implements vscode.TreeDataProvider<CommitNode>, vscode.
     this.repositoryChanged.dispose();
     this.historyChanged.dispose();
   }
+}
+// ツリーのファイル・差分・コメント・解説で同じ比較のキーになるよう、未コミットの区分の比較を 1 か所で組み立てる。
+function uncommittedTarget(repo: string, change: UncommittedChange, uncommitted: UncommittedSnapshot): CommitTarget {
+  return {
+    repo,
+    commit: canonicalCommit(change.commit, change.parent, undefined, uncommitted),
+    parent: change.parent,
+    uncommitted,
+  };
 }
 export type CommentNode =
   | { kind: 'group'; label: string; comments: ReviewComment[] }

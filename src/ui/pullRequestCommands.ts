@@ -74,7 +74,7 @@ export class PullRequestCommands {
 function isValidNumber(value: string): boolean {
   return /^\d+$/.test(value.trim()) && isPositiveInteger(Number(value));
 }
-function isPullRequestNode(value: unknown): value is Extract<PullRequestNode, { kind: 'pullRequest' }> {
+export function isPullRequestNode(value: unknown): value is Extract<PullRequestNode, { kind: 'pullRequest' }> {
   return (
     isRecord(value) &&
     value.kind === 'pullRequest' &&

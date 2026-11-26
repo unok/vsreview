@@ -209,6 +209,14 @@
       {
         "command": "vsreview.resetRevisionArchivePermissions",
         "title": "VSReview: リビジョン展開の許可・拒否をリセット"
+      },
+      {
+        "command": "vsreview.generateExplanation",
+        "title": "VSReview: 解説を生成"
+      },
+      {
+        "command": "vsreview.resetExplanationPermissions",
+        "title": "VSReview: 解説のための差分送信の許可・拒否をリセット"
       }
     ],
     "menus": {
@@ -321,6 +329,18 @@
         {
           "command": "vsreview.clearFileComments",
           "when": "view == vsreview.comments && viewItem == commentFile"
+        },
+        {
+          "command": "vsreview.generateExplanation",
+          "when": "view == vsreview.commits && viewItem == commit"
+        },
+        {
+          "command": "vsreview.generateExplanation",
+          "when": "view == vsreview.pullRequests && viewItem == pullRequest"
+        },
+        {
+          "command": "vsreview.generateExplanation",
+          "when": "view == vsreview.commits && viewItem == uncommittedGroup"
         }
       ],
       "editor/title": [
@@ -482,6 +502,10 @@
         },
         {
           "command": "vsreview.clearFileComments",
+          "when": "false"
+        },
+        {
+          "command": "vsreview.generateExplanation",
           "when": "false"
         }
       ]
