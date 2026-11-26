@@ -7,6 +7,7 @@ VSReview は Git のコミットや GitHub の Pull Request の差分にレビ�
 - 差分の前後それぞれのリポジトリ全体を、その時点のソースとして閲覧できます。変更のないファイルも開いてコメントを付けられます。
 - 前後のソースを展開して開くため、言語サーバーによる定義・参照・実装へのジャンプがソース間で使えます。
 - 付けた指摘をまとめて、AI Agent にそのまま渡せる指示文付きの Markdown または JSON として生成できます。
+- 差分で何が変わったかを、ファイルごとの日本語の解説で確認できます。
 
 ## 使い方
 
@@ -115,6 +116,22 @@ diff 抜粋の行頭「> 」が対象行、「  」が周辺行で、その後�
 
 検出済みリポジトリについて一覧の取得時や Git の HEAD・ブランチ参照の自動更新時に判定します。ワークスペース外の保存コメントに対しては Git を実行せず、到達可能性は判定しません。失われたコミットの差分を開けなくても、保存済みのコード抜粋と本文は出力できます。
 
+## 差分の解説
+
+Commits のコミット、Pull Requests の PR、または「未コミットの変更」の「ステージ済み」「未ステージ」を右クリックし、「解説を生成」を選びます。下部パネルの「解説」ビューは開いている差分のファイルに追従し、解説があるファイルにはツリーで「解説あり」と表示します。ビューと通知に生成中と表示し、通知から取り消せます。解説を作り直すときは差分を再送する前に確認し、生成に成功したときだけ以前の解説を置き換えます。
+
+VSReview は利用者の PC にある `claude` コマンド（Claude Code）に差分を標準入力で渡し、Claude Code は自身の設定に従って外部へ送信します。初回の許可・拒否はワークスペース内でリポジトリとエージェントの組ごとに保存します。`ANTHROPIC_BASE_URL` などで送信先を変えても以前の許可が適用されます。選び直すには「VSReview: 解説のための差分送信の許可・拒否をリセット」を実行してください。
+
+`--safe-mode` を使うため、Claude Code 2.1.170 以降を用意してください。Windows の npm 版（`.cmd`）は対象外です。OS の一時領域に作った空のディレクトリで、次の引数で実行します。ツール・MCP・スラッシュコマンド・セッション保存は無効で、リポジトリの `CLAUDE.md` やフックは読み込みません。管理ポリシーで配布された `UserPromptSubmit` フックにはプロンプトが渡ります。
+
+```sh
+claude -p --safe-mode --tools "" --strict-mcp-config --disable-slash-commands --no-session-persistence --permission-prompts none --output-format text
+```
+
+バイナリとサブモジュールの差分は送信しません。Git がテキスト差分として出力したファイルは NUL を含んでいても送信対象です。差分の UTF-8 バイト数が 1 ファイルで 100 KiB を超えるか、追加すると合計が 400 KiB を超える場合は、そのファイルを省略します。
+
+解説は VS Code のワークスペース保存領域の `explanations/` に比較ごとに 1 ファイル保存します。リポジトリごとに 50 件を超えると最終更新の古いものから削除します。ファイルとして使える保存領域が割り当てられていない場合はメモリだけに保持し、再起動すると消えます。コメントのエクスポートに解説は含まれません。未コミットの差分を開いた後に変更した場合や PR の head が進んだ場合は、差分を開き直すと新しい比較に切り替わります。開いたままのタブは以前の比較の解説を表示します。
+
 ## コマンド一覧
 
 ID はすべて `vsreview.` で始まります。引数が必要な内部操作はコマンドパレットから隠し、該当するツリー・エディタ・コメントのメニューから実行します。
@@ -133,6 +150,8 @@ ID はすべて `vsreview.` で始まります。引数が必要な内部操作�
 | `nextFile` / `previousFile`                                              | 表示順で同コミット内の前後へ移動                                             |
 | `clearRevisionArchives`                                                  | 展開したリビジョンをすべて削除                                               |
 | `resetRevisionArchivePermissions`                                        | 展開の許可・拒否をリセット                                                   |
+| `generateExplanation`                                                    | コミット・PR・未コミットの区分の解説を生成（右クリックメニュー）             |
+| `resetExplanationPermissions`                                            | 解説のための差分送信の許可・拒否をリセット                                   |
 | `openWorkingFile`                                                        | 作業ツリーの対応行で開く                                                     |
 | `addFileComment`                                                         | ファイルにコメントを追加                                                     |
 | `addRangeComment`                                                        | 行・範囲コメントを修正依頼として保存                                         |
@@ -157,6 +176,7 @@ ID はすべて `vsreview.` で始まります。引数が必要な内部操作�
 | -------------------------------------- | --------------------- | ---------------------------------------------------------------- |
 | `vsreview.revisionArchive.linkPaths`   | `["**/node_modules"]` | 元リポジトリへリンクする相対パス・`**/名前`（ユーザー設定のみ）  |
 | `vsreview.revisionArchive.maxCount`    | `10`                  | リポジトリごとの保存数（最小 2）。開いている分は保持             |
+| `vsreview.explanation.agent`           | `"claude"`            | 解説用 CLI。`"claude"` 固定（ユーザー設定のみ）                  |
 | `vsreview.fileView`                    | `"tree"`              | `"tree"` はフォルダ階層、`"list"` は一覧。切り替えボタンでも更新 |
 | `explorer.compactFolders`              | `true`                | 子が単一フォルダだけの連なりをまとめる VS Code の設定            |
 | `vsreview.autoRefresh`                 | `true`                | コミット・ブランチの変更に追従                                   |
@@ -209,7 +229,7 @@ pnpm run test:e2e
 pnpm exec vsce package --no-dependencies
 ```
 
-`check` は Prettier、型検査、ESLint、Vitest、esbuild を実行します。`pnpm format` で整形します。E2E は `which code` で解決した VS Code とスクリプト内で起動する Xvfb を使い、独立した設定・拡張フォルダを `.scratch/` に作ります。実行ファイルは `VSREVIEW_CODE`、Xvfb は `VSREVIEW_XVFB` で変更できます。ログは一時フォルダに残します。PR の E2E はテスト用の gh 実行ファイルを PATH の先頭に置き、ローカルの bare リポジトリを origin に使います。GitHub への書き込みは行いません。
+`check` は Prettier、型検査、ESLint、Vitest、esbuild を実行します。`pnpm format` で整形します。E2E は `which code` で解決した VS Code とスクリプト内で起動する Xvfb を使い、独立した設定・拡張フォルダを `.scratch/` に作ります。実行ファイルは `VSREVIEW_CODE`、Xvfb は `VSREVIEW_XVFB` で変更できます。ログは一時フォルダに残します。PR の E2E はテスト用の gh 実行ファイルを PATH の先頭に置き、ローカルの bare リポジトリを origin に使います。GitHub への書き込みは行いません。解説の E2E はテスト用の `claude` も PATH の先頭に置きます。
 
 純粋ロジックは `src/core/`、Git / gh CLI とファイル I/O は `src/git/`、VS Code API は `src/ui/` に分離しています。Git は shell を使わず `execFile`・`spawn` と NUL 区切りの出力を使い、ロケールを C に固定します。テストの一時リポジトリは後片付けします。テスト内のコミットは一時リポジトリだけに作成します。
 

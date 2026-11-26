@@ -73,6 +73,36 @@ process.stdout.write(JSON.stringify(process.argv[3] === 'list' ? [pr] : pr));
 `,
 );
 await chmod(fakeGh, 0o755);
+const fakeClaude = join(fakeBin, 'claude');
+await writeFile(
+  fakeClaude,
+  String.raw`#!/usr/bin/env node
+const { readFileSync, readdirSync, writeFileSync } = require('node:fs');
+const prompt = readFileSync(0, 'utf8');
+const files = Array.from(prompt.matchAll(/^## (F\d+)\n\nファイル: ("[^"\n]+")$/gm), ([, id, path]) => {
+  const name = JSON.parse(path);
+  const markdown = name === 'src/ui/nested.ts' ? ' \n' : '## テスト用の解説\n\n' + name + ' の差分を読みました。';
+  return { id, markdown };
+});
+const fail = process.env.VSREVIEW_E2E_CLAUDE_FAILURE === '1';
+if (!fail) {
+  const cwd = process.cwd();
+  const invocation = { args: process.argv.slice(2), cwd, entries: readdirSync(cwd), prompt, fileCount: files.length };
+  // 正常な起動は 1 回だけを想定する。2 回目は EEXIST で落とし、差分の二重送信を生成の失敗として表に出す。
+  writeFileSync(process.env.VSREVIEW_E2E_CLAUDE_LOG, JSON.stringify(invocation), { flag: 'wx' });
+}
+if (files.length === 0) {
+  process.stderr.write('テスト用 claude がプロンプトからファイルの ID とパスを読み取れませんでした\n');
+  process.exitCode = 1;
+} else if (fail) {
+  process.stderr.write('テスト用の失敗\n');
+  process.exitCode = 7;
+} else {
+  process.stdout.write(JSON.stringify({ files }));
+}
+`,
+);
+await chmod(fakeClaude, 0o755);
 const worktree = join(scratch, 'agent worktree 日本');
 git('worktree', 'add', '-b', 'review-agent', worktree, 'HEAD');
 // インストールやネットワークを使わず、pnpm のパッケージ別リンクを再現する。
@@ -135,6 +165,8 @@ try {
     ...process.env,
     PATH: `${fakeBin}:${process.env.PATH}`,
     DISPLAY: `:${display}`,
+    VSREVIEW_E2E_CLAUDE: fakeClaude,
+    VSREVIEW_E2E_CLAUDE_LOG: join(scratch, 'claude.json'),
     VSREVIEW_E2E_PULL_REQUEST: JSON.stringify(pullRequest),
     VSREVIEW_E2E_USER_DATA: userData,
     VSREVIEW_E2E_RESULT: join(scratch, 'result.json'),
@@ -169,7 +201,7 @@ try {
     throw new Error('拡張ホストが E2E 完了を記録しませんでした');
   }
   process.stdout.write(
-    'E2E passed: worktree amend auto-refresh / commits / working-tree diff / revision archives / deleted-file TypeScript definition / comments / PR tree / PR question export / Markdown / clipboard\n',
+    'E2E passed: worktree amend auto-refresh / commits / working-tree diff / revision archives / deleted-file TypeScript definition / comments / PR tree / PR question export / Markdown / clipboard / explanations\n',
   );
 } finally {
   if (xvfb.pid && !hasExited() && !spawnError) {
