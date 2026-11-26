@@ -17,7 +17,8 @@ const AGENT_FAILURE_DRAIN_MS = 1_000;
 const STDERR_TAIL_LENGTH = 1000;
 const STDERR_KEEP_BYTES = 16 * 1024;
 
-// エージェントごとの引数はここだけで決める。ツールを持たせず、設定・フック・MCP を読ませない。
+// エージェントごとの引数はここだけで決める。ツールを持たせず、利用者とリポジトリの設定・フック・MCP を読ませない。
+// 管理ポリシーで配布された設定とフックは --safe-mode でも有効で、プロンプトが渡る。
 export const AGENT_ARGUMENTS: Readonly<Record<ExplanationAgent, readonly string[]>> = {
   claude: [
     '-p',
