@@ -29,6 +29,7 @@ import type { CommitTarget } from './core/documents';
 import { ExplanationPermissions } from './ui/explanationPermissions';
 import { ReviewExplanations } from './ui/explanations';
 import { ExplanationCommands, registerExplanationCommands } from './ui/explanationCommands';
+import { ExplanationView, type ExplanationViewSnapshot } from './ui/explanationView';
 export interface ReviewApi {
   commentsTree: CommentsTree;
   commitsTree: CommitsTree;
@@ -37,6 +38,7 @@ export interface ReviewApi {
   filesTree: FilesTree;
   readonly resolveDocumentRef: (uri: vscode.Uri) => Promise<DocumentRef | undefined>;
   readonly provideFileDecoration: StatusDecorationProvider['provideFileDecoration'];
+  readonly getExplanationView: () => ExplanationViewSnapshot | undefined;
 }
 export async function activate(context: vscode.ExtensionContext): Promise<ReviewApi | undefined> {
   const access = new RepositoryAccess((repo) => new GitClient(repo));
@@ -72,12 +74,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
     return;
   }
   const explanationPermissions = new ExplanationPermissions(context.workspaceState);
+  // 保存領域がない場合はメモリだけで持つ。
+  const store = new ExplanationStore(context.storageUri?.scheme === 'file' ? context.storageUri.fsPath : undefined);
   const explanations = new ReviewExplanations({
     access,
-    // 保存領域がない場合はメモリだけで持つ。
-    store: new ExplanationStore(context.storageUri?.scheme === 'file' ? context.storageUri.fsPath : undefined),
+    store,
     permissions: explanationPermissions,
   });
+  const explanationView = new ExplanationView(documents, explanations, store.persistent);
   const explained = (target: CommitTarget, path: string): boolean => explanations.explained(target, path);
   const commitsTree = new CommitsTree(() => comments.all, access, changedFiles, captureUncommittedChanges, explained);
   const pullRequestsTree = PullRequestsTree.register(commitsTree, changedFiles, {
@@ -120,6 +124,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
     }),
     filesTree,
     explanations,
+    explanationView,
+    vscode.window.registerWebviewViewProvider('vsreview.explanation', explanationView),
     // 解説の生成・保存・読み込みで「解説あり」の表示を更新する。
     explanations.onDidChange(() => {
       commitsTree.rerender();
@@ -139,7 +145,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
     vscode.window.createTreeView('vsreview.comments', { treeDataProvider: commentsTree }),
     vscode.workspace.registerTextDocumentContentProvider('vsreview', new RevisionProvider(access)),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
-      void updateRepository(app, { select: true, preserveSelection: true }).catch(showError);
+      void updateRepository(app, { select: true, preserveSelection: true })
+        .then(() => explanationView.synchronize())
+        .catch(showError);
     }),
   );
   const editorQueue = new SerialQueue();
@@ -153,6 +161,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
           synchronizationRequested = false;
           const diffs = await documents.openDiffs();
           documents.recordActiveDiff(diffs);
+          void explanationView.synchronize(diffs);
           void archives.prune().catch((error: unknown) => archives.reportFailure(error));
           await filesTree.synchronize({ diffs });
           await comments.refresh({ diffs });
@@ -217,5 +226,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Review
     filesTree,
     resolveDocumentRef: (uri) => documents.resolve(uri),
     provideFileDecoration: (uri) => statusDecorations.provideFileDecoration(uri),
+    getExplanationView: () => explanationView.current,
   };
 }

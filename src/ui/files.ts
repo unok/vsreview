@@ -1,4 +1,4 @@
-import type { OpenDiff } from './reviewTargets';
+import { NO_DIFF, resolveFilesRef, type OpenDiff } from './reviewTargets';
 import { normalTabUris } from './tabs';
 import type { RevisionArchives } from './revisionArchives';
 import { showRepositoryError, type RepositoryAccess } from './repositories';
@@ -39,7 +39,6 @@ interface FileRoot {
   snapshot: FileSnapshot;
 }
 export type FileNode = FileRoot | (TreeEntry & { root: FileRoot; parent: FileNode });
-const NO_DIFF = '差分を開くと表示します';
 const UNCOMMITTED_UNSUPPORTED = '未コミットの差分は Files ビューに対応していません';
 
 export class FilesTree implements vscode.TreeDataProvider<FileNode>, vscode.Disposable {
@@ -117,22 +116,9 @@ export class FilesTree implements vscode.TreeDataProvider<FileNode>, vscode.Disp
   private async selectRef(diffs: readonly OpenDiff[]): Promise<DocumentRef | undefined> {
     const selected = this.selectedFile;
     const sameSnapshot = (ref: DocumentRef) => selected !== undefined && comparisonKey(ref) === comparisonKey(selected);
-    const uri = vscode.window.activeTextEditor?.document.uri;
-    const active = uri && (await this.documents.resolve(uri, { diffs }));
-    const activeDiff = diffs.find(({ active }) => active)?.ref;
-    const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
-    if (
-      active &&
-      (diffs.some(({ ref }) => comparisonKey(ref) === comparisonKey(active)) ||
-        (uri && (await this.documents.isExpanded(uri)))) &&
-      (!activeDiff ||
-        comparisonKey(activeDiff) === comparisonKey(active) ||
-        (activeTab instanceof vscode.TabInputText && activeTab.uri.toString() === uri?.toString()))
-    ) {
+    const active = await resolveFilesRef(this.documents, diffs);
+    if (active) {
       return active;
-    }
-    if (activeDiff) {
-      return activeDiff;
     }
     const openRefs = await Promise.all(
       normalTabUris().map(async (uri) => ({

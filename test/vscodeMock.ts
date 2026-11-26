@@ -109,6 +109,9 @@ export class TabInputTextDiff {
 export class TabInputText {
   constructor(readonly uri: VSCode.Uri) {}
 }
+export class TabInputWebview {
+  constructor(readonly viewType: string) {}
+}
 export const disposedThreads = new Set<VSCode.CommentThread>();
 export const threads: VSCode.CommentThread[] = [];
 export const docs: VSCode.TextDocument[] = [];
@@ -317,6 +320,7 @@ export const window = {
   },
   onDidChangeActiveTextEditor: editorChanged.event,
   onDidChangeWindowState: windowChanged.event,
+  registerWebviewViewProvider: vi.fn<typeof VSCode.window.registerWebviewViewProvider>(() => ({ dispose() {} })),
   createTreeView: vi.fn((id: string, options: { treeDataProvider: VSCode.TreeDataProvider<unknown> }) => {
     const visibilityChanged = new EventEmitter<VSCode.TreeViewVisibilityChangeEvent>();
     const elementCollapsed = new EventEmitter<VSCode.TreeViewExpansionEvent<unknown>>();
