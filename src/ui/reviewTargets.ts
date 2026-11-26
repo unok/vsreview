@@ -4,11 +4,63 @@ import type { DocumentRef } from '../core/documents';
 import type { ReviewComment } from '../core/model';
 import { comparisonKey } from '../core/comparisons';
 import { revisionUri } from './revisions';
+import type { ReviewDocuments } from './documents';
+export const NO_DIFF = '差分を開くと表示します';
 export interface OpenDiff {
   ref: DocumentRef;
   right: vscode.Uri;
   active: boolean;
 }
+type ReviewDocumentResolver = Pick<ReviewDocuments, 'resolve' | 'isExpanded'>;
+
+function activeDiffRef(diffs: readonly OpenDiff[]): DocumentRef | undefined {
+  return diffs.find(({ active }) => active)?.ref;
+}
+
+function resolveReviewRef(
+  documents: ReviewDocumentResolver,
+  diffs: readonly OpenDiff[],
+  uri: vscode.Uri | undefined,
+): Promise<DocumentRef | undefined> | undefined {
+  return uri && documents.resolve(uri, { diffs });
+}
+
+export async function resolveFilesRef(
+  documents: ReviewDocumentResolver,
+  diffs: readonly OpenDiff[],
+): Promise<DocumentRef | undefined> {
+  const uri = vscode.window.activeTextEditor?.document.uri;
+  const resolution = resolveReviewRef(documents, diffs, uri);
+  const active = resolution && (await resolution);
+  const activeDiff = activeDiffRef(diffs);
+  const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  if (
+    active &&
+    (diffs.some(({ ref }) => comparisonKey(ref) === comparisonKey(active)) ||
+      (uri && (await documents.isExpanded(uri)))) &&
+    (!activeDiff ||
+      comparisonKey(activeDiff) === comparisonKey(active) ||
+      (activeTab instanceof vscode.TabInputText && activeTab.uri.toString() === uri?.toString()))
+  ) {
+    return active;
+  }
+  return activeDiff;
+}
+
+export async function resolveExplanationRef(
+  documents: ReviewDocumentResolver,
+  diffs: readonly OpenDiff[],
+): Promise<DocumentRef | undefined> {
+  const tab = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  if (tab && !(tab instanceof vscode.TabInputText)) {
+    return tab instanceof vscode.TabInputTextDiff ? activeDiffRef(diffs) : undefined;
+  }
+  const uri = tab instanceof vscode.TabInputText ? tab.uri : vscode.window.activeTextEditor?.document.uri;
+  const ref = await resolveReviewRef(documents, diffs, uri);
+  // 作業ツリーの通常タブは、同じ URI が別の差分で開かれていても解説の対象にしない。
+  return ref && uri && (uri.scheme === 'vsreview' || (await documents.isExpanded(uri))) ? ref : undefined;
+}
+
 export interface ResolveOptions {
   commit?: string | undefined;
   comparison?: Pick<ReviewComment, 'repoRoot' | 'commit' | 'parent' | 'pullRequest'> | undefined;

@@ -17,7 +17,7 @@ import {
   ReviewExplanations,
   explanationTargetLabel,
 } from '../src/ui/explanations';
-import { accessFor, gitProcesses, repository, temporaryDirectory, workspaceFolder } from './fixtures';
+import { accessFor, deferred, gitProcesses, repository, temporaryDirectory, workspaceFolder } from './fixtures';
 import { hashId, repositoryId } from '../src/git/repositoryId';
 import { commitAll, gitAsAuthor } from './gitFixtures';
 import { progressCancelled, window } from './vscodeMock';
@@ -32,15 +32,6 @@ function answering(markdown: (id: string) => string = (id) => `# ${id} の解説
       }),
     ),
   );
-}
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((done, fail) => {
-    resolve = done;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
 }
 
 // 変更・リネーム・削除・バイナリ・サブモジュールを 1 コミットに含める。

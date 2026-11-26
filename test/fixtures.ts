@@ -146,6 +146,16 @@ export function waitFor(assertion: () => void | Promise<void>): Promise<void> {
   return vi.waitFor(assertion, { timeout: ASYNC_TEST_TIMEOUT_MS });
 }
 
+export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 export function gitProcesses() {
   const spy = vi.spyOn(childProcess, 'execFile');
   syncBuiltinESMExports();

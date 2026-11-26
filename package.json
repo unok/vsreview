@@ -17,6 +17,7 @@
     "onView:vsreview.pullRequests",
     "onView:vsreview.comments",
     "onView:vsreview.files",
+    "onView:vsreview.explanation",
     "onFileSystem:vsreview"
   ],
   "scripts": {
@@ -35,6 +36,13 @@
       "activitybar": [
         {
           "id": "vsreview",
+          "title": "VSReview",
+          "icon": "assets/review.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "vsreview-panel",
           "title": "VSReview",
           "icon": "assets/review.svg"
         }
@@ -58,6 +66,13 @@
           "id": "vsreview.files",
           "name": "Files",
           "visibility": "collapsed"
+        }
+      ],
+      "vsreview-panel": [
+        {
+          "id": "vsreview.explanation",
+          "name": "解説",
+          "type": "webview"
         }
       ]
     },
