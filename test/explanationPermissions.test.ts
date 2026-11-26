@@ -67,6 +67,21 @@ describe('explanationPermissions', () => {
     await new RevisionArchivePermissions(state).reset();
     expect(state.keys().sort()).toEqual([explanationPermissionKey('/repo', 'claude'), 'vsreview.comments'].sort());
   });
+  it('denied は保存済みの拒否だけを true とし、確認を表示しない', async () => {
+    const state = new KeyedState();
+    const permissions = new ExplanationPermissions(state);
+    expect(await permissions.denied('/repo', 'claude')).toBe(false);
+    await state.update(explanationPermissionKey('/repo', 'claude'), true);
+    expect(await permissions.denied('/repo', 'claude')).toBe(false);
+    await state.update(explanationPermissionKey('/repo', 'claude'), false);
+    expect(await permissions.denied('/repo', 'claude')).toBe(true);
+    expect(await permissions.denied('/other', 'claude')).toBe(false);
+    // リセットの完了を待たずに呼んでも、リセット後の値を返す。
+    const resetting = permissions.reset();
+    expect(await permissions.denied('/repo', 'claude')).toBe(false);
+    await resetting;
+    expect(warning).not.toHaveBeenCalled();
+  });
   it('リセット後は再確認する', async () => {
     const state = new KeyedState();
     const permissions = new ExplanationPermissions(state);

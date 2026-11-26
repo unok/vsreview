@@ -44,15 +44,12 @@ export class ReviewDiff {
         comment?.pullRequest ?? this.pullRequestReviews.review(target),
       );
     }
-    const old = fileSide(target.file, 'old');
-    const next = fileSide(target.file, 'new');
-    if (
-      (!old.empty && (await git.isGitlink(target.parent, old.path))) ||
-      (!next.empty && (await git.isGitlink(target.commit.hash, next.path)))
-    ) {
+    if (await git.isSubmoduleChange(target.parent, target.commit.hash, target.file)) {
       showInfo('サブモジュールの差分は表示できません');
       return;
     }
+    const old = fileSide(target.file, 'old');
+    const next = fileSide(target.file, 'new');
     const oldContent = old.empty ? undefined : await git.content(target.parent, old.path);
     const newContent = next.empty ? undefined : await git.content(target.commit.hash, next.path);
     if (oldContent?.binary || newContent?.binary) {
