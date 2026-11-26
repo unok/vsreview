@@ -122,7 +122,7 @@ Commits のコミット、Pull Requests の PR、または「未コミットの�
 
 VSReview は利用者の PC にある `claude` コマンド（Claude Code）に差分を標準入力で渡し、Claude Code は自身の設定に従って外部へ送信します。初回の許可・拒否はワークスペース内でリポジトリとエージェントの組ごとに保存します。`ANTHROPIC_BASE_URL` などで送信先を変えても以前の許可が適用されます。選び直すには「VSReview: 解説のための差分送信の許可・拒否をリセット」を実行してください。
 
-`--safe-mode` を使うため、Claude Code 2.1.170 以降を用意してください。Windows の npm 版（`.cmd`）は対象外です。OS の一時領域に作った空のディレクトリで、次の引数で実行します。ツール・MCP・スラッシュコマンド・セッション保存は無効で、リポジトリの `CLAUDE.md` やフックは読み込みません。管理ポリシーで配布された `UserPromptSubmit` フックにはプロンプトが渡ります。
+`--permission-prompts none` を使うため、Claude Code 2.1.259 以降を用意してください。Windows の npm 版（`.cmd`）は対象外です。OS の一時領域に作った空のディレクトリで、次の引数で実行します。ツール・MCP・スラッシュコマンド・セッション保存は無効で、リポジトリの `CLAUDE.md` やフックは読み込みません。管理ポリシーで配布された `UserPromptSubmit` フックにはプロンプトが渡ります。
 
 ```sh
 claude -p --safe-mode --tools "" --strict-mcp-config --disable-slash-commands --no-session-persistence --permission-prompts none --output-format text
