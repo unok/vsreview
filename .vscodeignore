@@ -16,3 +16,5 @@ dist/e2e/**
 .prettier*
 fixtures/**
 .multi-review/**
+.takt/**
+.github/**
