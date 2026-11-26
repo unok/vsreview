@@ -1,8 +1,32 @@
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isRecord } from '../core/validation';
-import { lstat, realpath, writeFile, rm, readFile } from 'node:fs/promises';
+import { lstat, mkdir, realpath, writeFile, rm, readFile } from 'node:fs/promises';
 import { isWithin } from '../core/paths';
+
+export async function directory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true });
+  if (!(await existingDirectory(path))) {
+    throw new Error(`保存先がディレクトリではありません: ${path}`);
+  }
+}
+
+// 保存先を作らずに確かめる。なければ false、リンクなどディレクトリでなければ directory と同じ理由で失敗する。
+export async function existingDirectory(path: string): Promise<boolean> {
+  let stats;
+  try {
+    stats = await lstat(path);
+  } catch (error) {
+    if (isRecord(error) && error.code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`保存先がディレクトリではありません: ${path}`);
+  }
+  return true;
+}
 
 export async function isRealFileWithin(root: string, path: string): Promise<boolean> {
   return isWithin(root, path) && isWithin(await realpath(root), await realpath(path));
