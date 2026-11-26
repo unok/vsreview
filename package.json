@@ -540,6 +540,15 @@
           "scope": "machine",
           "description": "展開先から元のリポジトリへリンクする相対パス、または直下を含む同名ディレクトリのパターン（**/node_modules など）。ワークスペース設定は使いません。"
         },
+        "vsreview.explanation.agent": {
+          "type": "string",
+          "enum": [
+            "claude"
+          ],
+          "default": "claude",
+          "scope": "machine",
+          "description": "差分の解説を生成する AI Agent の CLI。ワークスペース設定は使いません。"
+        },
         "vsreview.revisionArchive.maxCount": {
           "type": "integer",
           "default": 10,
